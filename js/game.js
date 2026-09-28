@@ -8,13 +8,14 @@ const ROWS = 10;
 const HALF_ROWS = Math.ceil(ROWS / 2);   // red half = rows [0, HALF_ROWS), mirrored into the blue half
 const HOME = { blue: [2, ROWS - 2], red: [COLS - 3, 1] };
 const MODEL_SCALE = 0.8;      // buildings & rocks sit inside their tile with a visible gap
-const RANGE = 3.5;            // connection radius in tiles (center to center)
+const RANGE = 3.5;            // longest connection radius in tiles (center to center)
+const SENDER_RANGE = { squad: RANGE / 2, tank: RANGE, heli: RANGE };
 const PATH_COST = 2;
 const UNITS_PER_PATH = 5;
 const PHASE_TIME = 30;
 const MAX_ROUNDS = 15;
 const START_BRICKS = 20;
-const START_HP = 15;
+const START_HP = 5;
 const CANNON_RANGE = 3.5;
 const CANNON_DMG = 1;
 const CANNON_RATE = 0.35;
@@ -24,34 +25,37 @@ const ARROW_RATE = 0.7;
 const ARROW_SPEED = 6;
 const QUARRY_YIELD = 2;
 const SHIELD_HP = 5;
-const MAX_HP = 40;
+const MAX_HP = 20;            // 4 floors
 const BLOCK_HALF = 0.42;      // half-size of a tile's blocking box for straight-line checks
 
-const MAX_LINKS = 4;           // outgoing paths per sender building
+const MAX_LINKS = 4;           // outgoing paths per sender building: 1 per floor, up to 4
 
 // What each sender building puts on a path every turn, per floor of the building
 // (a 2-floor squad sends 10 soldiers, a 2-floor tank building sends 2 tanks).
 const UNIT_TYPES = {
   squad: { unit: 'soldier', count: UNITS_PER_PATH, gap: 0.45, hp: 1, dmg: 1, speed: 0.95, alt: 0, gunRange: 0 },
-  tank: { unit: 'tank', count: 1, gap: 1.1, hp: 5, dmg: 5, speed: 0.7, alt: 0, gunRange: 1.5 },
+  tank: { unit: 'tank', count: 1, gap: 1.1, hp: 5, dmg: 5, speed: 0.7, alt: 0, gunRange: 2 },
   heli: { unit: 'heli', count: 1, gap: 1.0, hp: 5, dmg: 5, speed: 0.85, alt: 0.9, gunRange: 1.5 },
 };
 const floorsOf = (e) => Math.max(1, Math.ceil(e.hp / 5));
+const linkSlots = (e) => Math.min(MAX_LINKS, floorsOf(e));
 const unitsPerTurn = (e) => UNIT_TYPES[e.kind].count * floorsOf(e);
+const SENDER_KINDS = ['squad', 'tank', 'heli'];
 const GUN_RATE = 0.8;
 
 const CARDS = {
-  squad: { name: 'SQUAD', cost: 10, hp: 10, tip: 'Sends 5 soldiers per path' },
-  tank: { name: 'TANK', cost: 14, hp: 10, tip: 'Sends a tank: 5 hp, 5 dmg' },
-  heli: { name: 'HELI', cost: 18, hp: 10, tip: 'Sends a helicopter over obstacles' },
-  cannon: { name: 'CANNON', cost: 15, hp: 10, tip: 'Supply units → fires at the first thing in line' },
-  arrow: { name: 'ARROWS', cost: 12, hp: 10, tip: 'Piercing arrows to the map edge' },
-  quarry: { name: 'QUARRY', cost: 12, hp: 10, tip: 'Supply units → +2 bricks each' },
+  squad: { name: 'SQUAD', cost: 10, hp: 5, tip: 'Sends 5 soldiers per path' },
+  tank: { name: 'TANK', cost: 14, hp: 5, tip: 'Sends a tank: 5 hp, 5 dmg' },
+  heli: { name: 'HELI', cost: 18, hp: 5, tip: 'Sends a helicopter over obstacles' },
+  cannon: { name: 'CANNON', cost: 15, hp: 5, tip: 'Supply units → fires at the first thing in line' },
+  arrow: { name: 'ARROWS', cost: 12, hp: 5, tip: 'Piercing arrows to the map edge' },
+  quarry: { name: 'QUARRY', cost: 12, hp: 5, tip: 'Supply units → +2 bricks each' },
   shield: { name: 'SHIELD', cost: 8, tip: 'Drop on your building: blocks 5 hits' },
 };
 const DECK = { squad: 3, tank: 2, heli: 2, cannon: 2, arrow: 2, quarry: 2, shield: 2 };
 const isSender = (e) => !!e && (e.kind === 'squad' || e.kind === 'tank' || e.kind === 'heli');
 const losMode = (e) => (e.kind === 'heli' ? 'air' : 'ground');
+const rangeOf = (kind) => SENDER_RANGE[kind] ?? { cannon: CANNON_RANGE, arrow: ARROW_RANGE }[kind] ?? 0;
 
 // ---------------------------------------------------------------- DOM
 const $ = (id) => document.getElementById(id);
@@ -309,6 +313,17 @@ rangeFill.position.y = 0.015;
 rangeFill.visible = false;
 scene.add(rangeFill);
 
+function showRange(x, z, r, color = 0xffffff) {
+  const k = r / RANGE;
+  rangeRing.visible = rangeFill.visible = r > 0;
+  rangeRing.position.set(x, 0.02, z);
+  rangeFill.position.set(x, 0.015, z);
+  rangeRing.scale.set(k, k, 1);
+  rangeFill.scale.set(k, k, 1);
+  rangeRing.material.color.set(color);
+  rangeFill.material.color.set(color);
+}
+
 const markerSolid = tileMarkerTexture(false);
 const markerDashed = tileMarkerTexture(true);
 const markerPool = [];
@@ -413,6 +428,14 @@ function refreshEntity(e) {
     let html = `<span>${e.hp}</span>`;
     if (e.shield > 0) html += `<b>${e.shield}</b>`;
     if (e.kind === 'cannon' && e.ammo > 0) html += `<i>●${e.ammo}</i>`;
+    html = `<div class="row">${html}</div>`;
+    if (isSender(e)) {
+      // one circle per path slot; used slots are filled in
+      const used = outLinks(e);
+      html += '<div class="slots">';
+      for (let i = 0; i < linkSlots(e); i++) html += `<em class="${i < used ? 'used' : ''}"></em>`;
+      html += '</div>';
+    }
     e.label.innerHTML = html;
   }
 }
@@ -423,8 +446,17 @@ function removeEntity(e) {
   S.ents.splice(S.ents.indexOf(e), 1);
   scene.remove(e.obj);
   e.label.remove();
+  // units still marching at it vanish with the path
+  for (const u of S.units) {
+    if (u.alive && u.to === e) {
+      const p = unitPos(u);
+      killUnit(u, false);
+      burst(p.x, p.y + 0.15, p.z, 0xdddddd, 3, 0.4);
+    }
+  }
   const before = S.paths.length;
   S.paths = S.paths.filter((p) => p.from !== e && p.to !== e);
+  S.spawns = S.spawns.filter((sp) => S.paths.includes(sp.path));
   if (S.paths.length !== before) rebuildPaths();
 }
 
@@ -474,8 +506,8 @@ function checkConnect(team, from, to) {
   if (!from || !to || from === to) return { ok: false, silent: true };
   if (from.team !== team || !isSender(from)) return { ok: false, reason: 'Only squad, tank or heli buildings send units' };
   if (findPath(from, to)) return { ok: false, silent: true, reason: 'Already connected' };
-  if (outLinks(from) >= MAX_LINKS) return { ok: false, reason: `Max ${MAX_LINKS} paths per building` };
-  if (dist(from, to) > RANGE + 0.01) return { ok: false, reason: 'Out of range' };
+  if (outLinks(from) >= linkSlots(from)) return { ok: false, reason: linkSlots(from) < MAX_LINKS ? 'No free slot: add a floor' : `Max ${MAX_LINKS} paths` };
+  if (dist(from, to) > rangeOf(from.kind) + 0.01) return { ok: false, reason: 'Out of range' };
   if (!losClear(from, to, losMode(from))) {
     return { ok: false, reason: from.kind === 'heli' ? 'Mountains block helicopters' : 'Path blocked' };
   }
@@ -523,6 +555,7 @@ function rebuildPaths() {
     applyGrow(p);
     pathGroup.add(g);
   });
+  if (S.ents) S.ents.filter(isSender).forEach(refreshEntity);
 }
 function applyGrow(p) {
   const k = 1 - Math.pow(1 - Math.min(1, p.grow), 3);
@@ -603,7 +636,7 @@ function generateMap() {
       cells.push([c, r]);
     }
     shuffle(cells);
-    const pairs = 8;
+    const pairs = 12;
     for (let i = 0; i < pairs && i < cells.length; i++) {
       const [c, r] = cells[i];
       const centre = 1 - Math.abs(r - (ROWS - 1) / 2) / ((ROWS - 1) / 2);
@@ -612,7 +645,7 @@ function generateMap() {
       const mc = COLS - 1 - c, mr = ROWS - 1 - r;
       if (!entityAt(mc, mr)) addEntity('rock', null, mc, mr, hp);
     }
-    const reachable = S.ents.filter((e) => e.kind === 'rock' && dist(blue, e) <= RANGE && losClear(blue, e)).length;
+    const reachable = S.ents.filter((e) => e.kind === 'rock' && dist(blue, e) <= rangeOf('squad') + 0.01 && losClear(blue, e)).length;
     let freeNear = 0;
     for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
       if (!entityAt(c, r) && S.terrain[r][c] === 'ground' && Math.hypot(cx(c) - blue.x, cz(r) - blue.z) <= 2.3) freeNear++;
@@ -623,7 +656,7 @@ function generateMap() {
     const mid = Math.floor(ROWS / 2);
     for (let c = 0; c < COLS && !lane; c++) if (open(c, mid - 1) && open(c, mid) && (ROWS % 2 === 0 || open(c, mid + 1))) lane = true;
     const hasTerrain = S.terrain.flat().some((t) => t === 'water') && S.terrain.flat().some((t) => t === 'mountain');
-    if (reachable >= 2 && reachable <= 6 && freeNear >= 5 && lane && hasTerrain) break;
+    if (reachable >= 2 && freeNear >= 4 && lane && hasTerrain) break;
   }
   buildTerrainMeshes();
   S.ents.forEach(refreshEntity);
@@ -708,7 +741,15 @@ function damage(e, amount, team) {
   earn(team, dealt, e.x, h + 0.3, e.z);
   burst(e.x, h * 0.7, e.z, e.kind === 'rock' ? M.ROCK_COLOR : M.TEAM[e.team].body, 3, 0.6);
   if (e.hp <= 0) destroy(e, team);
-  else refreshEntity(e);
+  else {
+    if (isSender(e) && outLinks(e) > linkSlots(e)) {
+      const mine = S.paths.filter((p) => p.from === e);
+      for (const p of mine.slice(linkSlots(e))) S.paths.splice(S.paths.indexOf(p), 1);
+      S.spawns = S.spawns.filter((sp) => S.paths.includes(sp.path));
+      rebuildPaths();
+    }
+    refreshEntity(e);
+  }
 }
 
 function destroy(e, byTeam) {
@@ -970,7 +1011,8 @@ function updateBattle(dt) {
     }
     u.mesh.position.set(x, y, z);
   }
-  // vehicle guns shoot the nearest enemy unit
+  // vehicle guns shoot enemy units on their own path ahead of them
+  // (tanks: any unit up to 2 tiles; helis: ground units only)
   for (const u of S.units) {
     if (!u.alive || !u.gunRange) continue;
     u.cd -= dt;
@@ -979,8 +1021,12 @@ function updateBattle(dt) {
     const p = unitPos(u);
     for (const o of S.units) {
       if (!o.alive || o.team === u.team) continue;
-      const d = Math.hypot(o.mesh.position.x - p.x, o.mesh.position.z - p.z);
-      if (d < bd) { bd = d; best = o; }
+      if (u.type === 'heli' && o.type === 'heli') continue;
+      const rx = o.mesh.position.x - p.x, rz = o.mesh.position.z - p.z;
+      const along = rx * u.ux + rz * u.uz;
+      const across = Math.abs(rx * u.uz - rz * u.ux);
+      if (along < -0.15 || across > 0.45) continue;
+      if (along < bd) { bd = along; best = o; }
     }
     if (!best) continue;
     u.cd = GUN_RATE;
@@ -1065,7 +1111,7 @@ function cpuConnect() {
     const heavy = src.kind !== 'squad';
     for (const t of S.ents) {
       if (t === src || findPath(src, t)) continue;
-      if (dist(src, t) > RANGE || !losClear(src, t, losMode(src))) continue;
+      if (dist(src, t) > rangeOf(src.kind) + 0.01 || !losClear(src, t, losMode(src))) continue;
       let score;
       if (t.kind === 'rock') score = 6 + (t.hp <= 10 ? 3 : 0) - t.hp * 0.1 + (heavy && t.hp >= 10 ? 3 : 0);
       else if (t.team !== team) {
@@ -1128,11 +1174,11 @@ function cpuPickTile(kind, senders) {
     if (canPlace('red', kind, c, r) !== true) continue;
     const p = { x: cx(c), z: cz(r) };
     if (!senders.some((n) => dist(n, p) <= 2.6)) continue;
-    const feeder = senders.some((n) => dist(n, p) <= RANGE && losClear(n, p, losMode(n)));
+    const feeder = senders.some((n) => dist(n, p) <= rangeOf(n.kind) + 0.01 && losClear(n, p, losMode(n)));
     let score = Math.random() * 1.5;
     if (kind === 'squad' || kind === 'tank' || kind === 'heli') {
       const mode = kind === 'heli' ? 'air' : 'ground';
-      const around = S.ents.filter((e) => dist(e, p) <= RANGE && losClear(p, e, mode));
+      const around = S.ents.filter((e) => dist(e, p) <= rangeOf(kind) + 0.01 && losClear(p, e, mode));
       score += around.filter((e) => e.kind === 'rock').length + around.filter((e) => e.team === 'blue').length * 2 + r * 0.25;
       if (kind === 'heli') score += around.filter((e) => e.team === 'blue' && !losClear(p, e, 'ground')).length * 2;
     } else if (kind === 'cannon') {
@@ -1195,6 +1241,10 @@ function drawHand() {
     const h = [];
     const pool = [...bag];
     for (let i = 0; i < 4; i++) h.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+    if (!h.some((k) => SENDER_KINDS.includes(k))) {
+      const senders = bag.filter((k) => SENDER_KINDS.includes(k));
+      h[Math.floor(Math.random() * h.length)] = senders[Math.floor(Math.random() * senders.length)];
+    }
     return h;
   };
   S.hand.blue = pick();
@@ -1341,8 +1391,8 @@ function renderPanel() {
       <div class="info"><div class="big">${BRICK}${PATH_COST}</div><div class="small">per new<br>path</div></div>
       <div class="info"><div class="big">${UNITS_PER_PATH}</div><div class="small">soldiers or 1<br>vehicle / floor</div></div>
       <div class="info wide">
-        <p>Drag from a <b>squad, tank or heli</b> to a rock, enemy or your own building in range.</p>
-        <p>Max ${MAX_LINKS} paths each. Swipe across a path to cut it.</p>
+        <p>Drag from a <b>squad, tank or heli</b> to a target in range.</p>
+        <p>1 path per floor (max ${MAX_LINKS}). Swipe across a path to cut it.</p>
       </div>`;
     endBtn.textContent = 'END TURN';
     endBtn.disabled = false;
@@ -1469,14 +1519,12 @@ canvas.addEventListener('pointerdown', (ev) => {
     const e = pickEntity(ev);
     if (e && e.team === 'blue' && isSender(e)) {
       drag = { type: 'connect', src: e, id: ev.pointerId };
-      rangeRing.visible = rangeFill.visible = true;
-      rangeRing.position.set(e.x, 0.02, e.z);
-      rangeFill.position.set(e.x, 0.015, e.z);
+      showRange(e.x, e.z, rangeOf(e.kind));
       let i = 0;
       hideMarkers();
       for (const t of S.ents) {
         if (t === e || findPath(e, t)) continue;
-        if (dist(e, t) <= RANGE && losClear(e, t, losMode(e))) showMarker(i++, t.c, t.r, t.team === 'blue' ? 0x7fd0ff : 0xffffff, false, 0.75);
+        if (dist(e, t) <= rangeOf(e.kind) + 0.01 && losClear(e, t, losMode(e))) showMarker(i++, t.c, t.r, t.team === 'blue' ? 0x7fd0ff : 0xffffff, false, 0.75);
       }
       showMarker(i++, e.c, e.r, 0x7fd0ff, false, 1);
       e.bump = 0.5;
@@ -1528,7 +1576,7 @@ function moveConnect(ev) {
     showBubble(chk.ok ? chk.verb : (chk.reason || 'Cancel'), sp.x, sp.y - 8, chk.ok ? 'good' : 'bad');
   } else {
     drag.tgt = null;
-    const far = Math.hypot(gp.x - src.x, gp.z - src.z) > RANGE;
+    const far = Math.hypot(gp.x - src.x, gp.z - src.z) > rangeOf(src.kind);
     setDragLine(src.x, src.z, gp.x, gp.z, far ? 0xff5a5a : 0xffffff, losMode(src));
     showBubble(far ? 'Out of range' : 'Drag to a target', p.x, p.y - 34, far ? 'bad' : '');
   }
@@ -1577,10 +1625,11 @@ function moveCard(ev) {
   const cell = overPanel(ev) ? null : cellAt(groundPoint(ev));
   drag.cell = cell;
   if (drag.ghost) drag.ghost.visible = !!cell;
-  if (!cell) { hideBubble(); return; }
+  if (!cell) { hideBubble(); rangeRing.visible = rangeFill.visible = false; return; }
   const ok = canPlace('blue', drag.kind, cell.c, cell.r);
   showMarker(0, cell.c, cell.r, ok === true ? 0x9ff3ff : 0xff5a5a, true, 1);
   if (drag.ghost) drag.ghost.position.set(cx(cell.c), 0.05, cz(cell.r));
+  if (drag.kind !== 'shield') showRange(cx(cell.c), cz(cell.r), rangeOf(drag.kind), ok === true ? 0x9ff3ff : 0xff8a8a);
   const e = entityAt(cell.c, cell.r);
   const sp = toScreen(cx(cell.c), (e ? entHeight(e) : 0.3) + 0.5, cz(cell.r));
   const hint = drag.kind === 'shield' ? 'Drop on your building' : 'Place on an empty tile';
@@ -1686,9 +1735,10 @@ window.addEventListener('resize', fitCamera);
 // ---------------------------------------------------------------- per-frame
 function updateLabels() {
   for (const e of S.ents) {
-    const y = e.kind === 'rock' ? 0.63 : entHeight(e) + 0.3;
-    const p = toScreen(e.x, y, e.z);
-    e.label.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, -50%)`;
+    // rocks: number on the top face; buildings: label sits just above the roof
+    const rock = e.kind === 'rock';
+    const p = toScreen(e.x, rock ? 0.63 : entHeight(e) + 0.12, e.z);
+    e.label.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, ${rock ? -50 : -100}%)`;
   }
   for (const u of S.units) {
     if (!u.alive || !u.label) continue;
@@ -1725,7 +1775,7 @@ function updateHand(time) {
   const src = buildings('blue').find(isSender);
   if (!src) return;
   if (!S.tutorialTarget || !S.tutorialTarget.alive) {
-    S.tutorialTarget = S.ents.filter((t) => t.kind === 'rock' && dist(src, t) <= RANGE && losClear(src, t, losMode(src))).sort((a, b) => a.hp - b.hp)[0];
+    S.tutorialTarget = S.ents.filter((t) => t.kind === 'rock' && dist(src, t) <= rangeOf(src.kind) + 0.01 && losClear(src, t, losMode(src))).sort((a, b) => a.hp - b.hp)[0];
   }
   const t = S.tutorialTarget;
   if (!t) return;
@@ -1800,10 +1850,10 @@ function closeModal() {
 const RULES = `
   <ul>
     <li><b>Build → Connect → Battle.</b> Both teams act at the same time. Each phase lasts ${PHASE_TIME}s, or press the button to finish early. Round 1 skips Build.</li>
-    <li><b>Connect:</b> drag from a squad, tank or heli building to a rock, enemy or friendly building within its range. Each new path costs ${PATH_COST} bricks, max ${MAX_LINKS} paths per building. Swipe across a path to cut it (no refund).</li>
+    <li><b>Connect:</b> drag from a squad, tank or heli building to a rock, enemy or friendly building within range (squads ${SENDER_RANGE.squad} tiles, tanks &amp; helis ${RANGE}). Each new path costs ${PATH_COST} bricks. A building gets one path slot per floor (max ${MAX_LINKS}); the circles under its number show free slots. Swipe across a path to cut it (no refund).</li>
     <li><b>Terrain:</b> rocks, buildings and <b>water</b> block ground paths. <b>Helicopters</b> fly over them. <b>Mountains</b> block every path and every shot. You can't build on water or mountains.</li>
-    <li><b>Units:</b> a <b>squad</b> sends ${UNITS_PER_PATH} soldiers (1 hp, 1 dmg each). A <b>tank</b> or <b>heli</b> sends one vehicle with 5 hp that shoots enemy units nearby and hits for 5 on arrival. Every floor of the building adds another batch. Each point of damage on a rock, building or enemy unit earns 1 brick. Armies on opposing paths clash in the middle.</li>
-    <li><b>Friendly paths:</b> every 5 hp delivered = +1 floor. Supply a <b>cannon</b> (1 shot per unit) or a <b>quarry</b> (+${QUARRY_YIELD} bricks per unit). Draw a friendly path the other way to reverse it.</li>
+    <li><b>Units:</b> a <b>squad</b> sends ${UNITS_PER_PATH} soldiers (1 hp, 1 dmg each). A <b>tank</b> or <b>heli</b> sends one vehicle with 5 hp that hits for 5 on arrival. Tanks shoot any enemy unit on their path up to 2 tiles ahead; helis shoot ground units on their path. Every floor of the building adds another batch. Each point of damage on a rock, building or enemy unit earns 1 brick. Armies on opposing paths clash in the middle.</li>
+    <li><b>Floors:</b> every building starts with 1 floor (5 hp) and can grow to ${MAX_HP / 5} floors (${MAX_HP} hp). <b>Friendly paths:</b> every 5 hp delivered = +1 floor. Supply a <b>cannon</b> (1 shot per unit) or a <b>quarry</b> (+${QUARRY_YIELD} bricks per unit). Draw a friendly path the other way to reverse it.</li>
     <li><b>Towers:</b> cannon balls hit the first unit, building or rock in line. <b>Arrows</b> fly to the map edge and hit everything they pass. Both deal 1 damage. <b>Shields</b> go on your building and absorb ${SHIELD_HP} hits.</li>
     <li>Destroy every enemy building to win, or have the most buildings after ${MAX_ROUNDS} rounds.</li>
   </ul>`;
