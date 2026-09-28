@@ -44,9 +44,9 @@ const RARITY = { squad: 'common', tank: 'mid', heli: 'rare', cannon: 'common', a
 // What each sender building puts on a path every turn, per floor of the building
 // (a 2-floor squad sends 10 soldiers, a 2-floor tank building sends 2 tanks).
 const UNIT_TYPES = {
-  squad: { unit: 'soldier', count: UNITS_PER_PATH, gap: 0.7, hp: 1, dmg: 1, speed: 0.55, alt: 0, gunRange: 0 },
-  tank: { unit: 'tank', count: 1, gap: 1.7, hp: 5, dmg: 5, speed: 0.42, alt: 0, gunRange: 2 },
-  heli: { unit: 'heli', count: 1, gap: 1.5, hp: 5, dmg: 5, speed: 0.5, alt: 0.9, gunRange: 1.5 },
+  squad: { unit: 'soldier', count: UNITS_PER_PATH, gap: 0.6, hp: 1, dmg: 1, speed: 0.66, alt: 0, gunRange: 0 },
+  tank: { unit: 'tank', count: 1, gap: 1.45, hp: 5, dmg: 5, speed: 0.5, alt: 0, gunRange: 2 },
+  heli: { unit: 'heli', count: 1, gap: 1.3, hp: 5, dmg: 5, speed: 0.6, alt: 0.9, gunRange: 1.5 },
 };
 const floorsOf = (e) => Math.max(1, Math.ceil(e.hp / 5));
 const linkSlots = (e) => Math.min(MAX_LINKS, floorsOf(e));
