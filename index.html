@@ -24,8 +24,14 @@
     <div id="labels"></div>
     <div id="floats"></div>
 
+    <div id="modeFrame"></div>
+
     <header id="hud">
-      <div class="title-pill">CITY BREAKER</div>
+      <div class="hud-btns">
+        <button id="pauseBtn" class="round-btn" aria-label="Pause"><svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.5" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1.5" fill="currentColor"/></svg></button>
+        <button id="restartBtn" class="round-btn" aria-label="Restart"><svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M19.5 3.5v5h-5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button id="helpBtn" class="round-btn" aria-label="How to play">?</button>
+      </div>
       <div class="phase-box">
         <div class="phase-pill" id="phasePill">1 • CONNECT</div>
         <div class="timer-pill">
@@ -33,28 +39,20 @@
           <span id="timerText">CONNECT • 30s</span>
         </div>
       </div>
-      <div class="brick-pill"><i class="brick"></i><span id="brickCount">20</span></div>
+      <div class="brick-pill"><i class="brick"></i><span id="brickCount">6</span></div>
     </header>
 
     <div id="hudRow2">
       <div class="team-chip blue">YOU <b id="blueCount">1</b></div>
-      <div class="hud-btns">
-        <button id="pauseBtn" class="round-btn" aria-label="Pause"><svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.5" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1.5" fill="currentColor"/></svg></button>
-        <button id="restartBtn" class="round-btn" aria-label="Restart"><svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M19.5 3.5v5h-5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <button id="helpBtn" class="round-btn" aria-label="How to play">?</button>
-      </div>
+      <button id="goBtn" class="go-btn">READY <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor"/></svg></button>
+      <div id="modePill" class="mode-pill"></div>
       <div class="team-chip red">CPU <b id="redCount">1</b></div>
     </div>
 
+    <div id="banner" class="banner"><b></b><span></span></div>
     <div id="bubble" class="bubble hidden"></div>
     <div id="hand" class="hand hidden">👆</div>
     <div id="toast" class="toast"></div>
-
-    <section id="panel">
-      <div id="panelTitle">CONNECT • DRAG A PATH</div>
-      <div id="panelBody"></div>
-      <button id="endBtn">END TURN</button>
-    </section>
 
     <div id="modal" class="modal">
       <div class="modal-box" id="modalBox"></div>

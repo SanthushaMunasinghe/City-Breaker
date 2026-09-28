@@ -1,61 +1,87 @@
-// City Breaker — build → connect → battle, blue (you) vs red (CPU) on a shared grid.
+// City Breaker (Hex Warriors version) — connect → battle, blue (you) vs red (CPU).
+// No building phase: every building claims a square zone, and you grow by
+// breaking locked flag towers inside your zones to unlock what they hide.
 import * as THREE from 'three';
 import * as M from './models.js';
 
 // ---------------------------------------------------------------- tuning
-const COLS = 6;
-const ROWS = 10;
+const COLS = 5;
+const ROWS = 9;
 const HALF_ROWS = Math.ceil(ROWS / 2);   // red half = rows [0, HALF_ROWS), mirrored into the blue half
-const HOME = { blue: [2, ROWS - 2], red: [COLS - 3, 1] };
-const MODEL_SCALE = 0.8;      // buildings & rocks sit inside their tile with a visible gap
-const RANGE = 3.5;            // longest connection radius in tiles (center to center)
-const SENDER_RANGE = { squad: RANGE / 2, tank: RANGE, heli: RANGE };
-const PATH_COST = 0;           // drawing paths is free
+const HOME = { blue: [2, ROWS - 2], red: [2, 1] };
+const MODEL_SCALE = 0.66;     // buildings & rocks sit well inside their tile so paths show between them
+const TILE = 0.9;             // tile size; the rest of each cell is the gap between tiles
+// Zone = square of cells around a building (Chebyshev radius). It is both the
+// building's reach (paths, tower shots) and the land it claims.
+const ZONE = { squad: 1, tank: 2, heli: 2, cannon: 2, arrow: 2, quarry: 1 };
+const PATH_COST = 5;           // bricks per new connection
+const START_BRICKS = 15;
 const UNITS_PER_PATH = 5;
 const PHASE_TIME = 30;
 const MAX_ROUNDS = 15;
-const START_BRICKS = 20;
-const START_HP = 5;
-const CANNON_RANGE = 3.5;
+const START_HP = 5;           // 1 floor
 const CANNON_DMG = 1;
 const CANNON_RATE = 0.35;
-const CANNON_SPEED = 5;
-const ARROW_RANGE = 2.5;
-const ARROW_RATE = 0.7;
-const ARROW_SPEED = 6;
+const CANNON_SPEED = 4;
+const ARROW_RATE = 0.4;
+const ARROW_SPEED = 4.5;
 const QUARRY_YIELD = 2;
-const SHIELD_HP = 5;
 const MAX_HP = 20;            // 4 floors
 const BLOCK_HALF = 0.42;      // half-size of a tile's blocking box for straight-line checks
-
 const MAX_LINKS = 4;           // outgoing paths per sender building: 1 per floor, up to 4
+const REVEAL_CHANCE = 0.5;     // broken rock → flag tower, destroyed enemy building → your building
+// What a flag tower hides / what a captured enemy tile turns into: first a
+// group (unit buildings 65% > artillery > resource), then a kind inside it.
+const SPAWN_GROUPS = {
+  unit: { weight: 65, kinds: { squad: 55, tank: 30, heli: 15 } },
+  artillery: { weight: 27, kinds: { cannon: 60, arrow: 40 } },
+  resource: { weight: 8, kinds: { quarry: 1 } },
+};
+const GROUP_OF = { squad: 'unit', tank: 'unit', heli: 'unit', cannon: 'artillery', arrow: 'artillery', quarry: 'resource' };
+const RARITY = { squad: 'common', tank: 'mid', heli: 'rare', cannon: 'common', arrow: 'mid', quarry: 'rare' };
 
 // What each sender building puts on a path every turn, per floor of the building
 // (a 2-floor squad sends 10 soldiers, a 2-floor tank building sends 2 tanks).
 const UNIT_TYPES = {
-  squad: { unit: 'soldier', count: UNITS_PER_PATH, gap: 0.45, hp: 1, dmg: 1, speed: 0.95, alt: 0, gunRange: 0 },
-  tank: { unit: 'tank', count: 1, gap: 1.1, hp: 5, dmg: 5, speed: 0.7, alt: 0, gunRange: 2 },
-  heli: { unit: 'heli', count: 1, gap: 1.0, hp: 5, dmg: 5, speed: 0.85, alt: 0.9, gunRange: 1.5 },
+  squad: { unit: 'soldier', count: UNITS_PER_PATH, gap: 0.7, hp: 1, dmg: 1, speed: 0.55, alt: 0, gunRange: 0 },
+  tank: { unit: 'tank', count: 1, gap: 1.7, hp: 5, dmg: 5, speed: 0.42, alt: 0, gunRange: 2 },
+  heli: { unit: 'heli', count: 1, gap: 1.5, hp: 5, dmg: 5, speed: 0.5, alt: 0.9, gunRange: 1.5 },
 };
 const floorsOf = (e) => Math.max(1, Math.ceil(e.hp / 5));
 const linkSlots = (e) => Math.min(MAX_LINKS, floorsOf(e));
 const unitsPerTurn = (e) => UNIT_TYPES[e.kind].count * floorsOf(e);
-const SENDER_KINDS = ['squad', 'tank', 'heli'];
 const GUN_RATE = 0.8;
 
-const CARDS = {
-  squad: { name: 'SQUAD', cost: 10, hp: 5, tip: 'Sends 5 soldiers per path' },
-  tank: { name: 'TANK', cost: 14, hp: 5, tip: 'Sends a tank: 5 hp, 5 dmg' },
-  heli: { name: 'HELI', cost: 18, hp: 5, tip: 'Sends a helicopter over obstacles' },
-  cannon: { name: 'CANNON', cost: 15, hp: 5, tip: 'Supply units → fires at the first thing in line' },
-  arrow: { name: 'ARROWS', cost: 12, hp: 5, tip: 'Piercing arrows to the map edge' },
-  quarry: { name: 'QUARRY', cost: 12, hp: 5, tip: 'Supply units → +2 bricks each' },
-  shield: { name: 'SHIELD', cost: 8, tip: 'Drop on your building: blocks 5 hits' },
+const INFO = {
+  squad: { name: 'SQUAD', line: 'Sends 5 soldiers down each of its paths every battle.' },
+  tank: { name: 'TANK', line: 'Sends a 5 hp tank that shoots units ahead and hits for 5.' },
+  heli: { name: 'HELI', line: 'Sends a helicopter that flies over rocks, towers and water. Hits for 5.' },
+  cannon: { name: 'CANNON', line: 'Feed it from a unit building: every point delivered = 1 cannon ball (a tank = 5). Hits the first thing in line.' },
+  arrow: { name: 'ARROWS', line: 'Feed it from a unit building: every point delivered = 1 arrow that pierces to the edge of its zone.' },
+  quarry: { name: 'QUARRY', line: `Connect a path to it: every unit you send in = +${QUARRY_YIELD} bricks.` },
 };
-const DECK = { squad: 3, tank: 2, heli: 2, cannon: 2, arrow: 2, quarry: 2, shield: 2 };
 const isSender = (e) => !!e && (e.kind === 'squad' || e.kind === 'tank' || e.kind === 'heli');
+// Artillery never fires on its own: it shoots the ammo unit buildings deliver
+// (1 shot per point), at the target it's aimed at or else the nearest one.
+const isArtillery = (e) => !!e && (e.kind === 'cannon' || e.kind === 'arrow');
+const canSource = (e) => isSender(e) || isArtillery(e);
 const losMode = (e) => (e.kind === 'heli' ? 'air' : 'ground');
-const rangeOf = (kind) => SENDER_RANGE[kind] ?? { cannon: CANNON_RANGE, arrow: ARROW_RANGE }[kind] ?? 0;
+const zoneOf = (e) => ZONE[e.kind] ?? 0;
+const zoneSize = (kind) => `${ZONE[kind] * 2 + 1}×${ZONE[kind] * 2 + 1}`;
+const cheb = (a, c, r) => Math.max(Math.abs(a.c - c), Math.abs(a.r - r));
+const inZone = (src, t) => cheb(src, t.c, t.r) <= zoneOf(src);
+
+function pickWeighted(weights) {
+  const entries = Object.entries(weights);
+  let x = Math.random() * entries.reduce((s, [, w]) => s + w, 0);
+  for (const [k, w] of entries) if ((x -= w) < 0) return k;
+  return entries[0][0];
+}
+// group: 'unit' | 'artillery' | 'resource', or omitted to roll the group too
+function rollKind(group) {
+  const g = group || pickWeighted(Object.fromEntries(Object.entries(SPAWN_GROUPS).map(([k, v]) => [k, v.weight])));
+  return pickWeighted(SPAWN_GROUPS[g].kinds);
+}
 
 // ---------------------------------------------------------------- DOM
 const $ = (id) => document.getElementById(id);
@@ -63,10 +89,9 @@ const app = $('app');
 const canvas = $('scene');
 const labelsEl = $('labels');
 const floatsEl = $('floats');
-const panel = $('panel');
-const panelTitle = $('panelTitle');
-const panelBody = $('panelBody');
-const endBtn = $('endBtn');
+const goBtn = $('goBtn');
+const modePill = $('modePill');
+const bannerEl = $('banner');
 const bubble = $('bubble');
 const hand = $('hand');
 const toastEl = $('toast');
@@ -83,7 +108,7 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe8893a);
 const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200);
-const CAM_PITCH = THREE.MathUtils.degToRad(65);
+const CAM_PITCH = THREE.MathUtils.degToRad(62);
 let camDist = 20;
 let shake = 0;
 
@@ -93,7 +118,7 @@ function addLights(target) {
   sun.position.set(-5, 11, 6);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 12, bottom: -12, near: 1, far: 40 });
+  Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 10, bottom: -10, near: 1, far: 40 });
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.02;
   target.add(sun);
@@ -115,49 +140,35 @@ function mulberry(a) {
   };
 }
 
-function tileTexture() {
-  const T = 128;
-  const cv = document.createElement('canvas');
-  cv.width = COLS * T; cv.height = ROWS * T;
-  const g = cv.getContext('2d');
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      g.fillStyle = (r + c) % 2 ? '#f59d45' : '#f6a24b';
-      g.fillRect(c * T, r * T, T, T);
-      g.fillStyle = 'rgba(255,255,255,.07)';
-      g.fillRect(c * T + 6, r * T + 6, T - 12, 6);
-    }
-  }
-  g.strokeStyle = 'rgba(196,105,30,.45)';
-  g.lineWidth = 3;
-  for (let c = 0; c <= COLS; c++) { g.beginPath(); g.moveTo(c * T, 0); g.lineTo(c * T, ROWS * T); g.stroke(); }
-  for (let r = 0; r <= ROWS; r++) { g.beginPath(); g.moveTo(0, r * T); g.lineTo(COLS * T, r * T); g.stroke(); }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  return tex;
-}
-
 function buildEnvironment() {
   const rand = mulberry(7);
   const sand = new THREE.Mesh(new THREE.PlaneGeometry(90, 90), new THREE.MeshStandardMaterial({ color: 0xee9140, roughness: 1 }));
   sand.rotation.x = -Math.PI / 2;
-  sand.position.y = -0.01;
+  sand.position.y = -0.1;
   sand.receiveShadow = true;
   scene.add(sand);
 
-  const board = new THREE.Mesh(new THREE.PlaneGeometry(COLS, ROWS), new THREE.MeshStandardMaterial({ map: tileTexture(), roughness: 1 }));
-  board.rotation.x = -Math.PI / 2;
-  board.receiveShadow = true;
-  scene.add(board);
+  // sunken board bed with one raised tile per cell, so every cell reads on its own
+  const bed = new THREE.Mesh(M.rbox(COLS + 0.18, 0.1, ROWS + 0.18, 0.06), M.mat(0xc46a28, { roughness: 1 }));
+  bed.position.y = -0.1;
+  bed.receiveShadow = true;
+  scene.add(bed);
+  const tileGeo = M.rbox(TILE, 0.1, TILE, 0.05);
+  const tileMats = [M.mat(0xf6a24b, { roughness: 1 }), M.mat(0xf3993f, { roughness: 1 })];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const t = new THREE.Mesh(tileGeo, tileMats[(r + c) % 2]);
+    t.position.set(cx(c), -0.04, cz(r));
+    t.receiveShadow = true;
+    scene.add(t);
+  }
 
   // wooden fence rails around the board
   const wood = M.mat(0xe9c98a);
-  const hw = COLS / 2 + 0.22, hh = ROWS / 2 + 0.22;
+  const hw = COLS / 2 + 0.26, hh = ROWS / 2 + 0.26;
   const railH = 0.07;
   const rails = [
-    [0, -hh, COLS + 0.5, 0.06], [0, hh, COLS + 0.5, 0.06],
-    [-hw, 0, 0.06, ROWS + 0.5], [hw, 0, 0.06, ROWS + 0.5],
+    [0, -hh, COLS + 0.58, 0.06], [0, hh, COLS + 0.58, 0.06],
+    [-hw, 0, 0.06, ROWS + 0.58], [hw, 0, 0.06, ROWS + 0.58],
   ];
   for (const [x, z, w, d] of rails) {
     const m = new THREE.Mesh(M.box(w, railH, d), wood);
@@ -184,25 +195,15 @@ function buildEnvironment() {
     m.receiveShadow = true;
     scene.add(m);
   };
-  for (let x = -9; x <= 9; x += 1.3 + rand() * 0.6) {
+  for (let x = -8; x <= 8; x += 1.3 + rand() * 0.6) {
     addBoulder(x, -hh - 1.6 - rand() * 1.4, 0.9 + rand() * 0.9);
     addBoulder(x, -hh - 3.6 - rand() * 2, 1.2 + rand() * 1.2);
-    addBoulder(x, hh + 1.4 + rand() * 1.2, 0.8 + rand() * 0.9);
+    addBoulder(x, hh + 1.6 + rand() * 1.2, 0.8 + rand() * 0.9);
   }
   for (let z = -hh; z <= hh; z += 1.2 + rand() * 0.9) {
-    addBoulder(-hw - 2.4 - rand() * 1.6, z, 0.8 + rand() * 1.1);
-    addBoulder(hw + 2.4 + rand() * 1.6, z, 0.8 + rand() * 1.1);
+    addBoulder(-hw - 2.2 - rand() * 1.6, z, 0.8 + rand() * 1.1);
+    addBoulder(hw + 2.2 + rand() * 1.6, z, 0.8 + rand() * 1.1);
   }
-  // pebbles
-  const peb = new THREE.DodecahedronGeometry(0.14, 0);
-  for (let i = 0; i < 26; i++) {
-    const side = rand() < 0.5 ? -1 : 1;
-    const m = new THREE.Mesh(peb, M.mat(0x7d5140, { flatShading: true }));
-    m.position.set(side * (hw + 0.4 + rand() * 1.4), 0.05, (rand() - 0.5) * (ROWS + 2));
-    m.castShadow = true;
-    scene.add(m);
-  }
-
   // cacti
   const green = M.mat(0x4c9a3c, { roughness: 0.8 });
   const cyl = new THREE.CylinderGeometry(0.055, 0.06, 1, 8);
@@ -217,13 +218,13 @@ function buildEnvironment() {
     g.rotation.y = rand() * Math.PI;
     scene.add(g);
   };
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 24; i++) {
     const side = rand() < 0.5 ? -1 : 1;
     addCactus(side * (hw + 0.45 + rand() * 1.5), (rand() - 0.5) * (ROWS + 1), 0.9 + rand() * 0.8);
   }
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 8; i++) {
     addCactus((rand() - 0.5) * (COLS + 3), -hh - 0.6 - rand() * 0.5, 0.9 + rand() * 0.6);
-    addCactus((rand() - 0.5) * (COLS + 3), hh + 0.55 + rand() * 0.5, 0.9 + rand() * 0.6);
+    addCactus((rand() - 0.5) * (COLS + 3), hh + 0.6 + rand() * 0.5, 0.9 + rand() * 0.6);
   }
 }
 buildEnvironment();
@@ -266,14 +267,21 @@ function tileMarkerTexture(dashed) {
 }
 
 const dotTex = { ground: dotTexture(false), air: dotTexture(true) };
+const borderTex = dotTexture(false);   // static copy for territory & zone outlines
 const TEAM_DOT = { blue: 0x2f80ff, red: 0xf0303c };
 const pathMat = {};
+const borderMat = {};
 for (const team of ['blue', 'red']) {
   pathMat[team] = {};
   for (const mode of ['ground', 'air']) {
     pathMat[team][mode] = new THREE.MeshBasicMaterial({ map: dotTex[mode], color: TEAM_DOT[team], transparent: true, depthWrite: false });
   }
+  borderMat[team] = new THREE.MeshBasicMaterial({ map: borderTex, color: TEAM_DOT[team], transparent: true, depthWrite: false });
 }
+const aimMat = {
+  blue: new THREE.MeshBasicMaterial({ map: dotTex.air, color: 0x8fd0ff, transparent: true, depthWrite: false }),
+  red: new THREE.MeshBasicMaterial({ map: dotTex.air, color: 0xff8a8a, transparent: true, depthWrite: false }),
+};
 const dragMat = new THREE.MeshBasicMaterial({ map: dotTex.ground, transparent: true, depthWrite: false, color: 0xffffff });
 const DOT_GAP = 0.26;
 
@@ -294,42 +302,43 @@ function ribbon(x1, z1, x2, z2, width, material, y, uvScale = 0.4) {
   g.rotation.y = Math.atan2(-(z2 - z1), x2 - x1);
   return g;
 }
-
-// markers: range ring, tile highlights, drag line
-const rangeRing = new THREE.Mesh(
-  new THREE.RingGeometry(RANGE - 0.05, RANGE, 72),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7, depthWrite: false }),
-);
-rangeRing.rotation.x = -Math.PI / 2;
-rangeRing.position.y = 0.02;
-rangeRing.visible = false;
-scene.add(rangeRing);
-const rangeFill = new THREE.Mesh(
-  new THREE.CircleGeometry(RANGE, 72),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1, depthWrite: false }),
-);
-rangeFill.rotation.x = -Math.PI / 2;
-rangeFill.position.y = 0.015;
-rangeFill.visible = false;
-scene.add(rangeFill);
-
-function showRange(x, z, r, color = 0xffffff) {
-  const k = r / RANGE;
-  rangeRing.visible = rangeFill.visible = r > 0;
-  rangeRing.position.set(x, 0.02, z);
-  rangeFill.position.set(x, 0.015, z);
-  rangeRing.scale.set(k, k, 1);
-  rangeFill.scale.set(k, k, 1);
-  rangeRing.material.color.set(color);
-  rangeFill.material.color.set(color);
+function disposeGroup(group) {
+  for (const g of [...group.children]) {
+    group.remove(g);
+    g.traverse((o) => o.geometry && o.geometry.dispose());
+  }
 }
+
+// square zone highlight shown while dragging from (or tapping) a building
+const zoneGroup = new THREE.Group();
+scene.add(zoneGroup);
+const zoneFillMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.16, depthWrite: false });
+const zoneLineMat = new THREE.MeshBasicMaterial({ map: borderTex, color: 0xffffff, transparent: true, depthWrite: false });
+function showZone(e, color = 0xffffff) {
+  hideZone();
+  const R = zoneOf(e);
+  if (!R) return;
+  const pad = 0.03;
+  const x0 = cx(Math.max(0, e.c - R)) - 0.5 + pad, x1 = cx(Math.min(COLS - 1, e.c + R)) + 0.5 - pad;
+  const z0 = cz(Math.max(0, e.r - R)) - 0.5 + pad, z1 = cz(Math.min(ROWS - 1, e.r + R)) + 0.5 - pad;
+  zoneFillMat.color.set(color);
+  zoneLineMat.color.set(color);
+  const fill = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, z1 - z0), zoneFillMat);
+  fill.rotation.x = -Math.PI / 2;
+  fill.position.set((x0 + x1) / 2, 0.018, (z0 + z1) / 2);
+  zoneGroup.add(fill);
+  for (const [a, b, c, d] of [[x0, z0, x1, z0], [x1, z0, x1, z1], [x1, z1, x0, z1], [x0, z1, x0, z0]]) {
+    zoneGroup.add(ribbon(a, b, c, d, 0.09, zoneLineMat, 0.03, 0.2));
+  }
+}
+function hideZone() { disposeGroup(zoneGroup); }
 
 const markerSolid = tileMarkerTexture(false);
 const markerDashed = tileMarkerTexture(true);
 const markerPool = [];
 function marker(i) {
   if (!markerPool[i]) {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.98, 0.98),
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE),
       new THREE.MeshBasicMaterial({ map: markerSolid, transparent: true, depthWrite: false }));
     m.rotation.x = -Math.PI / 2;
     m.position.y = 0.025;
@@ -359,6 +368,20 @@ function setDragLine(x1, z1, x2, z2, color, mode = 'ground') {
   scene.add(dragLine);
 }
 
+// ---------------------------------------------------------------- tips memory
+const TIP_KEY = 'cb-hex-tips';
+let seenTips = {};
+try { seenTips = JSON.parse(localStorage.getItem(TIP_KEY) || '{}') || {}; } catch (_) { seenTips = {}; }
+const seen = (id) => !!seenTips[id];
+function markSeen(id) {
+  seenTips[id] = 1;
+  try { localStorage.setItem(TIP_KEY, JSON.stringify(seenTips)); } catch (_) { /* storage optional */ }
+}
+function resetTips() {
+  seenTips = {};
+  try { localStorage.removeItem(TIP_KEY); } catch (_) { /* storage optional */ }
+}
+
 // ---------------------------------------------------------------- game state
 let S = null;
 
@@ -375,14 +398,13 @@ function newState() {
     units: [],
     projectiles: [],
     spawns: [],
-    hand: { blue: [], red: [] },
-    selected: -1,
     nextId: 1,
     battleT: 0,
     settle: 0,
     earned: 0,
-    stats: { destroyed: 0, lost: 0, bricks: 0 },
-    tutorial: true,
+    stats: { destroyed: 0, lost: 0, bricks: 0, unlocked: 0 },
+    tipQueue: [],
+    battleHold: 0,
     paused: false,
   };
 }
@@ -391,17 +413,20 @@ const entityAt = (c, r) => (inBounds(c, r) ? S.grid[r][c] : null);
 const terrainAt = (c, r) => (inBounds(c, r) ? S.terrain[r][c] : 'edge');
 const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const buildings = (team) => S.ents.filter((e) => e.team === team);
+const neutralColor = (e) => (e.kind === 'flag' ? 0x9aa0a8 : M.ROCK_COLOR);
+const entColor = (e) => (e.team ? M.TEAM[e.team].body : neutralColor(e));
 
-function addEntity(kind, team, c, r, hp) {
-  const e = { id: S.nextId++, kind, team, c, r, hp, shield: 0, ammo: 0, cd: 0, alive: true, x: cx(c), z: cz(r), pop: 0, bump: 0 };
-  e.obj = M.makeModel(kind, team);
+function addEntity(kind, team, c, r, hp, hidden = null) {
+  const e = { id: S.nextId++, kind, team, c, r, hp, hidden, ammo: 0, cd: 0, alive: true, x: cx(c), z: cz(r), pop: 0, bump: 0 };
+  e.obj = M.makeModel(kind, team || 'blue');
   e.obj.position.set(e.x, 0, e.z);
   e.obj.userData.ent = e;
   if (team === 'red' && e.obj.userData.turret) e.obj.userData.turret.rotation.y = Math.PI - 0.5;
   if (team === 'red' && e.obj.userData.roof) e.obj.userData.roof.rotation.y = Math.PI;
+  if (kind === 'flag') e.obj.rotation.y = (Math.random() - 0.5) * 0.6;
   scene.add(e.obj);
   e.label = document.createElement('div');
-  e.label.className = 'lbl ' + (team ? 'lbl-' + team : 'lbl-rock');
+  e.label.className = 'lbl ' + (team ? 'lbl-' + team : kind === 'flag' ? 'lbl-flag' : 'lbl-rock');
   labelsEl.appendChild(e.label);
   S.grid[r][c] = e;
   S.ents.push(e);
@@ -412,22 +437,15 @@ function addEntity(kind, team, c, r, hp) {
 function entHeight(e) { return e.obj.userData.getHeight() * MODEL_SCALE; }
 
 function refreshEntity(e) {
-  if (isSender(e)) e.obj.userData.setFloors(Math.max(1, Math.ceil(e.hp / 5)));
-  if (e.shield > 0 && !e.shieldObj) {
-    e.shieldObj = M.makeShield();
-    e.obj.add(e.shieldObj);
-  } else if (e.shield <= 0 && e.shieldObj) {
-    e.obj.remove(e.shieldObj);
-    e.shieldObj = null;
-  }
-  if (e.shieldObj) e.shieldObj.userData.setHeight(entHeight(e));
+  if (isSender(e)) e.obj.userData.setFloors(floorsOf(e));
   if (e.kind === 'rock') {
     e.label.textContent = e.hp;
     e.label.classList.toggle('low', e.hp <= 5);
+  } else if (e.kind === 'flag') {
+    e.label.innerHTML = `<span>${e.hp}</span>`;
   } else {
     let html = `<span>${e.hp}</span>`;
-    if (e.shield > 0) html += `<b>${e.shield}</b>`;
-    if (e.kind === 'cannon' && e.ammo > 0) html += `<i>●${e.ammo}</i>`;
+    if (isArtillery(e)) html += `<i>●${e.ammo}</i>`;
     html = `<div class="row">${html}</div>`;
     if (isSender(e)) {
       // one circle per path slot; used slots are filled in
@@ -460,6 +478,84 @@ function removeEntity(e) {
   if (S.paths.length !== before) rebuildPaths();
 }
 
+// ---------------------------------------------------------------- territory
+// Union of a team's building zones, outlined with a dotted line in team colour.
+const terrGroup = { blue: new THREE.Group(), red: new THREE.Group() };
+scene.add(terrGroup.blue, terrGroup.red);
+const terrKey = { blue: '', red: '' };
+const terrGrow = { blue: 1, red: 1 };
+const BORDER_INSET = 0.1;
+
+function zoneCells(team) {
+  const inside = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+  for (const e of buildings(team)) {
+    const R = zoneOf(e);
+    for (let r = e.r - R; r <= e.r + R; r++) for (let c = e.c - R; c <= e.c + R; c++) {
+      if (inBounds(c, r)) inside[r][c] = true;
+    }
+  }
+  return inside;
+}
+
+function territorySegments(inside) {
+  const at = (c, r) => inBounds(c, r) && inside[r][c];
+  const d = BORDER_INSET;
+  const segs = [];
+  const sides = [[0, -1], [1, 0], [0, 1], [-1, 0]];   // outward normals: up, right, down, left
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (!inside[r][c]) continue;
+    for (const [nx, nz] of sides) {
+      if (at(c + nx, r + nz)) continue;
+      const tx = -nz, tz = nx;   // tangent along the edge
+      const ex = cx(c) + nx * (0.5 - d), ez = cz(r) + nz * (0.5 - d);
+      const ends = [1, -1].map((s) => {
+        // convex corner: pull the end in; concave corner: push it out to meet the next side
+        let k = 0.5;
+        if (!at(c + tx * s, r + tz * s)) k -= d;
+        else if (at(c + tx * s + nx, r + tz * s + nz)) k += d;
+        return [ex + tx * s * k, ez + tz * s * k];
+      });
+      const [[ax, az], [bx, bz]] = ends;
+      segs.push(nz !== 0
+        ? { h: true, k: ez, a: Math.min(ax, bx), b: Math.max(ax, bx) }
+        : { h: false, k: ex, a: Math.min(az, bz), b: Math.max(az, bz) });
+    }
+  }
+  // merge collinear neighbours so the dots run evenly along each side
+  segs.sort((p, q) => (p.h - q.h) || (p.k - q.k) || (p.a - q.a));
+  const out = [];
+  for (const s of segs) {
+    const last = out[out.length - 1];
+    if (last && last.h === s.h && Math.abs(last.k - s.k) < 1e-6 && s.a <= last.b + 1e-6) last.b = Math.max(last.b, s.b);
+    else out.push({ ...s });
+  }
+  return out;
+}
+
+function rebuildTerritory() {
+  for (const team of ['blue', 'red']) {
+    const inside = zoneCells(team);
+    const key = inside.flat().map((b) => (b ? 1 : 0)).join('');
+    if (key === terrKey[team]) continue;
+    const count = (k) => [...k].filter((ch) => ch === '1').length;
+    const grew = terrKey[team] !== '' && count(key) > count(terrKey[team]);
+    terrKey[team] = key;
+    disposeGroup(terrGroup[team]);
+    const y = team === 'blue' ? 0.024 : 0.022;
+    for (const s of territorySegments(inside)) {
+      const g = s.h ? ribbon(s.a, s.k, s.b, s.k, 0.075, borderMat[team], y, 0.2) : ribbon(s.k, s.a, s.k, s.b, 0.075, borderMat[team], y, 0.2);
+      terrGroup[team].add(g);
+    }
+    terrGrow[team] = grew ? 0 : 1;
+    applyTerrGrow(team);
+    if (team === 'blue' && grew) queueTip('territoryGrew');
+  }
+}
+function applyTerrGrow(team) {
+  const k = 1 - Math.pow(1 - Math.min(1, terrGrow[team]), 3);
+  for (const g of terrGroup[team].children) g.scale.x = Math.max(0.001, k);
+}
+
 // ---------------------------------------------------------------- geometry checks
 function segHitsBox(x1, z1, x2, z2, bx, bz, h) {
   let t0 = 0, t1 = 1;
@@ -477,7 +573,7 @@ function segHitsBox(x1, z1, x2, z2, bx, bz, h) {
   }
   return true;
 }
-// mode 'ground': rocks, buildings, water and mountains block. 'air': only mountains block.
+// mode 'ground': rocks, towers, buildings, water and mountains block. 'air': only mountains block.
 function losClear(a, b, mode = 'ground') {
   if (mode === 'ground') {
     for (const e of S.ents) {
@@ -492,52 +588,77 @@ function losClear(a, b, mode = 'ground') {
   }
   return true;
 }
-function pathCrossesCell(c, r) {
-  const x = cx(c), z = cz(r);
-  return S.paths.some((p) => segHitsBox(p.from.x, p.from.z, p.to.x, p.to.z, x, z, BLOCK_HALF));
-}
 
 // ---------------------------------------------------------------- paths
 const findPath = (from, to) => S.paths.find((p) => p.from === from && p.to === to);
 const outLinks = (e) => S.paths.filter((p) => p.from === e).length;
-const partnerOf = (p) => S.paths.find((q) => q.from === p.to && q.to === p.from && q.team !== p.team);
+const partnerOf = (p) => isSender(p.from) && S.paths.find((q) => q.from === p.to && q.to === p.from && q.team !== p.team && isSender(q.from));
 
 function checkConnect(team, from, to) {
   if (!from || !to || from === to) return { ok: false, silent: true };
-  if (from.team !== team || !isSender(from)) return { ok: false, reason: 'Only squad, tank or heli buildings send units' };
+  if (from.team !== team || !canSource(from)) return { ok: false, reason: 'Quarries don\'t send anything' };
   if (findPath(from, to)) return { ok: false, silent: true, reason: 'Already connected' };
+  if (!inZone(from, to)) return { ok: false, reason: 'Outside its zone' };
+  if (isArtillery(from)) {
+    if (to.team === team && !isSender(to)) return { ok: false, reason: 'Artillery only boosts unit buildings' };
+    if (outLinks(from) >= 1) return { ok: false, reason: 'One aim per artillery: tap its path to remove' };
+    if (!losClear(from, to, 'air')) return { ok: false, reason: 'Mountains block the shot' };
+    if (S.bricks[team] < PATH_COST) return { ok: false, reason: `Need ${PATH_COST} bricks`, broke: true };
+    return { ok: true, verb: `${to.team === team ? 'Boost floors' : 'Aim here'}  −${PATH_COST}` };
+  }
   if (outLinks(from) >= linkSlots(from)) return { ok: false, reason: linkSlots(from) < MAX_LINKS ? 'No free slot: add a floor' : `Max ${MAX_LINKS} paths` };
-  if (dist(from, to) > rangeOf(from.kind) + 0.01) return { ok: false, reason: 'Out of range' };
   if (!losClear(from, to, losMode(from))) {
     return { ok: false, reason: from.kind === 'heli' ? 'Mountains block helicopters' : 'Path blocked' };
   }
+  if (S.bricks[team] < PATH_COST) return { ok: false, reason: `Need ${PATH_COST} bricks`, broke: true };
   let verb = 'Attack!';
   if (to.kind === 'rock') verb = 'Mine rock';
+  else if (to.kind === 'flag') verb = 'Capture!';
   else if (to.team === team) {
-    verb = { cannon: 'Supply cannon', quarry: 'Supply quarry' }[to.kind] || 'Reinforce';
-    if (findPath(to, from)) verb = 'Reverse path';
+    verb = { cannon: 'Load cannon', arrow: 'Load arrows', quarry: 'Supply quarry' }[to.kind] || 'Reinforce';
+    if (isSender(to) && findPath(to, from)) verb = 'Reverse path';
   }
-  return { ok: true, verb };
+  return { ok: true, verb: `${verb}  −${PATH_COST}` };
 }
 
 function connect(team, from, to) {
   const chk = checkConnect(team, from, to);
   if (!chk.ok) return chk;
-  if (to.team === team) {
+  if (to.team === team && isSender(from) && isSender(to)) {
     const rev = findPath(to, from);
     if (rev) S.paths.splice(S.paths.indexOf(rev), 1);
   }
-  S.paths.push({ id: S.nextId++, team, from, to, grow: 0 });
+  S.bricks[team] -= PATH_COST;
+  const p = { id: S.nextId++, team, from, to, grow: 0 };
+  S.paths.push(p);
   rebuildPaths();
+  if (team === 'blue') pathCostFx(p);
   updateHud();
   return chk;
 }
 
-function rebuildPaths() {
-  for (const g of [...pathGroup.children]) {
-    pathGroup.remove(g);
-    g.traverse((o) => o.geometry && o.geometry.dispose());
+// Tapping a path during connect removes it (no refund).
+function pathAt(gp) {
+  let best = null, bd = 0.24;
+  for (const p of S.paths) {
+    if (p.team !== 'blue') continue;
+    const q = pointSegDist(gp.x, gp.z, p.from.x, p.from.z, p.to.x, p.to.z);
+    if (q.d < bd && q.t > 0.08 && q.t < 0.92) { bd = q.d; best = p; }
   }
+  return best;
+}
+function removePath(p) {
+  S.paths.splice(S.paths.indexOf(p), 1);
+  S.spawns = S.spawns.filter((sp) => sp.path !== p);
+  const mx = (p.from.x + p.to.x) / 2, mz = (p.from.z + p.to.z) / 2;
+  burst(mx, 0.1, mz, 0xffffff, 8, 0.6);
+  rebuildPaths();
+  updateHud();
+  toast('Path removed');
+}
+
+function rebuildPaths() {
+  disposeGroup(pathGroup);
   S.paths.forEach((p, i) => {
     const dx = p.to.x - p.from.x, dz = p.to.z - p.from.z, D = Math.hypot(dx, dz);
     const ux = dx / D, uz = dz / D;
@@ -547,7 +668,8 @@ function rebuildPaths() {
     const ex = p.from.x + ux * endD, ez = p.from.z + uz * endD;
     const y = 0.035 + (i % 8) * 0.002;
     const g = new THREE.Group();
-    g.add(ribbon(sx, sz, ex, ez, 0.17, pathMat[p.team][losMode(p.from)], y, DOT_GAP));
+    if (isArtillery(p.from)) g.add(ribbon(sx, sz, ex, ez, 0.13, aimMat[p.team], y, DOT_GAP * 0.8));
+    else g.add(ribbon(sx, sz, ex, ez, 0.17, pathMat[p.team][losMode(p.from)], y, DOT_GAP));
     g.userData.path = p;
     p.mesh = g;
     applyGrow(p);
@@ -560,17 +682,36 @@ function applyGrow(p) {
   for (const r of p.mesh.children) r.scale.x = Math.max(0.001, k);
 }
 
+// Two bricks hop from the counter onto the new path and get laid into it.
+function pathCostFx(p) {
+  const pill = document.querySelector('.brick-pill');
+  pill.classList.remove('spend'); void pill.offsetWidth; pill.classList.add('spend');
+  const ar = app.getBoundingClientRect();
+  const br = pill.querySelector('.brick').getBoundingClientRect();
+  const sx = br.left + br.width / 2 - ar.left, sy = br.top + br.height / 2 - ar.top;
+  for (let i = 0; i < PATH_COST; i++) {
+    const k = (i + 1) / (PATH_COST + 1);
+    const wx = p.from.x + (p.to.x - p.from.x) * k, wz = p.from.z + (p.to.z - p.from.z) * k;
+    const el = document.createElement('i');
+    el.className = 'brick flybrick';
+    el.style.transform = `translate(${sx}px, ${sy}px) scale(.8)`;
+    floatsEl.appendChild(el);
+    setTimeout(() => {
+      const d = toScreen(wx, 0.05, wz);
+      el.style.transform = `translate(${d.x}px, ${d.y}px) scale(.55) rotate(${i ? 20 : -20}deg)`;
+    }, 30 + i * 140);
+    setTimeout(() => {
+      el.remove();
+      burst(wx, 0.08, wz, 0xea612c, 5, 0.45);
+    }, 560 + i * 140);
+  }
+  const mx = (p.from.x + p.to.x) / 2, mz = (p.from.z + p.to.z) / 2;
+  setTimeout(() => floatText(mx, 0.5, mz, `−${PATH_COST}${BRICK}`, 'cost', 1300), 620);
+}
+
 // ---------------------------------------------------------------- map generation
 const terrainGroup = new THREE.Group();
 scene.add(terrainGroup);
-
-function shuffle(a) {
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
 
 // Terrain is placed in the red half and mirrored through the board centre.
 function generateTerrain(home) {
@@ -580,26 +721,26 @@ function generateTerrain(home) {
   const set = (c, r, t) => {
     if (!inBounds(c, r) || r >= HALF_ROWS || nearHome(c, r) || T[r][c] !== 'ground') return false;
     const [mc, mr] = mirror(c, r);
-    if (nearHome(mc, mr)) return false;
+    if (nearHome(mc, mr) || (mc === c && mr === r)) return false;
     T[r][c] = t;
     T[mr][mc] = t;
     return true;
   };
-  // water pools
-  const pools = 1 + (Math.random() < 0.5 ? 1 : 0);
-  for (let p = 0; p < pools; p++) {
-    let c = Math.floor(Math.random() * COLS), r = 2 + Math.floor(Math.random() * (HALF_ROWS - 2));
+  // one small water pool
+  for (let tries = 0; tries < 20; tries++) {
+    const c = Math.floor(Math.random() * COLS), r = 3 + Math.floor(Math.random() * (HALF_ROWS - 3));
     if (!set(c, r, 'water')) continue;
-    const size = 1 + Math.floor(Math.random() * 3);
-    for (let k = 0; k < size; k++) {
-      const [dc, dr] = [[1, 0], [-1, 0], [0, 1], [0, -1]][Math.floor(Math.random() * 4)];
-      if (set(c + dc, r + dr, 'water')) { c += dc; r += dr; }
+    if (r !== HALF_ROWS - 1 && Math.random() < 0.3) {
+      const [dc, dr] = [[1, 0], [-1, 0], [0, 1]][Math.floor(Math.random() * 3)];
+      set(c + dc, r + dr, 'water');
     }
+    break;
   }
-  // mountain tiles
-  const peaks = 1 + Math.floor(Math.random() * 2);
-  for (let k = 0, tries = 0; k < peaks && tries < 40; tries++) {
-    if (set(Math.floor(Math.random() * COLS), 1 + Math.floor(Math.random() * (HALF_ROWS - 1)), 'mountain')) k++;
+  // maybe one mountain
+  if (Math.random() < 0.35) {
+    for (let tries = 0; tries < 20; tries++) {
+      if (set(Math.floor(Math.random() * COLS), 3 + Math.floor(Math.random() * (HALF_ROWS - 3)), 'mountain')) break;
+    }
   }
   return T;
 }
@@ -611,53 +752,108 @@ function buildTerrainMeshes() {
     if (t === 'ground') continue;
     const m = t === 'water' ? M.makeWaterTile() : M.makeMountain(c * 1.7 + r);
     m.position.set(cx(c), 0, cz(r));
+    m.scale.set(TILE, 1, TILE);
     terrainGroup.add(m);
   }
 }
 
 function generateMap() {
   const home = HOME;
+  const mid = HALF_ROWS - 1;   // centre row, mirrors onto itself
   for (let attempt = 0; attempt < 400; attempt++) {
     S.grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
     S.ents.forEach((e) => { scene.remove(e.obj); e.label.remove(); });
     S.ents = [];
     S.terrain = generateTerrain(home);
     const blue = addEntity('squad', 'blue', ...home.blue, START_HP);
-    addEntity('squad', 'red', ...home.red, START_HP);
-    // mirrored rock pairs keep the map fair
-    const cells = [];
+    const red = addEntity('squad', 'red', ...home.red, START_HP);
+    // mirrored pairs (same hp, same hidden building) keep the map fair
     for (let r = 0; r < HALF_ROWS; r++) for (let c = 0; c < COLS; c++) {
-      if (ROWS % 2 && r === HALF_ROWS - 1 && c >= COLS / 2) continue;  // odd boards: centre row mirrors onto itself
-      if (S.terrain[r][c] !== 'ground') continue;
-      if (entityAt(c, r) || entityAt(COLS - 1 - c, ROWS - 1 - r)) continue;
-      if (Math.abs(c - home.red[0]) + Math.abs(r - home.red[1]) <= 1) continue;
-      cells.push([c, r]);
-    }
-    shuffle(cells);
-    const pairs = 12;
-    for (let i = 0; i < pairs && i < cells.length; i++) {
-      const [c, r] = cells[i];
-      const centre = 1 - Math.abs(r - (ROWS - 1) / 2) / ((ROWS - 1) / 2);
-      const hp = 5 * Math.max(1, Math.min(5, Math.round(1 + centre * 3 + Math.random() * 1.6)));
-      addEntity('rock', null, c, r, hp);
+      if (r === mid && c > (COLS - 1) / 2) continue;
+      if (S.terrain[r][c] !== 'ground' || entityAt(c, r)) continue;
+      const band = cheb(red, c, r) <= 1 ? 0 : r === mid ? 2 : 1;
+      const roll = Math.random();
+      let kind = null, hp = 0, hidden = null;
+      if (roll < 0.38) {
+        kind = 'rock';
+        hp = 5 * ([1, 1, 2][band] + (band && Math.random() < 0.5 ? 1 : 0));
+      } else if (roll < 0.72) {
+        kind = 'flag';
+        hp = [5, 10, 15][band];
+        hidden = rollKind();
+      }
+      if (!kind) continue;
+      addEntity(kind, null, c, r, hp, hidden);
       const mc = COLS - 1 - c, mr = ROWS - 1 - r;
-      if (!entityAt(mc, mr)) addEntity('rock', null, mc, mr, hp);
+      if (!entityAt(mc, mr)) addEntity(kind, null, mc, mr, hp, hidden);
     }
-    const reachable = S.ents.filter((e) => e.kind === 'rock' && dist(blue, e) <= rangeOf('squad') + 0.01 && losClear(blue, e)).length;
-    let freeNear = 0;
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-      if (!entityAt(c, r) && S.terrain[r][c] === 'ground' && Math.hypot(cx(c) - blue.x, cz(r) - blue.z) <= 2.3) freeNear++;
+    const chained = ensureUnitChain();
+    // home zone: the squad, at least one flag tower and one rock; the rest is random
+    let flags = 0, rocks = 0;
+    for (let r = blue.r - 1; r <= blue.r + 1; r++) for (let c = blue.c - 1; c <= blue.c + 1; c++) {
+      if (!inBounds(c, r) || (c === blue.c && r === blue.r)) continue;
+      const e = entityAt(c, r);
+      if (e && e.kind === 'flag') flags++;
+      else if (e && e.kind === 'rock') rocks++;
     }
-    // at least one open lane between the two halves
-    const open = (c, r) => !entityAt(c, r) && S.terrain[r][c] === 'ground';
-    let lane = false;
-    const mid = Math.floor(ROWS / 2);
-    for (let c = 0; c < COLS && !lane; c++) if (open(c, mid - 1) && open(c, mid) && (ROWS % 2 === 0 || open(c, mid + 1))) lane = true;
-    const hasTerrain = S.terrain.flat().some((t) => t === 'water') && S.terrain.flat().some((t) => t === 'mountain');
-    if (reachable >= 2 && freeNear >= 4 && lane && hasTerrain) break;
+    const totalFlags = S.ents.filter((e) => e.kind === 'flag').length;
+    let openMid = 0;
+    for (let c = 0; c < COLS; c++) if (!entityAt(c, mid) && S.terrain[mid][c] === 'ground') openMid++;
+    if (chained && flags >= 1 && flags <= 4 && rocks >= 1 && totalFlags >= 8 && openMid >= 1) break;
   }
   buildTerrainMeshes();
   S.ents.forEach(refreshEntity);
+}
+
+// Flag towers hiding unit buildings, chained zone to zone from the home base.
+// Returns the zones (c, r, R) blue can eventually send units from.
+function unitReach(team) {
+  const home = buildings(team).find(isSender);
+  if (!home) return [];
+  const reach = [{ c: home.c, r: home.r, R: zoneOf(home) }];
+  const used = new Set();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const f of S.ents) {
+      if (f.kind !== 'flag' || used.has(f) || GROUP_OF[f.hidden] !== 'unit') continue;
+      if (reach.some((n) => cheb(n, f.c, f.r) <= n.R)) {
+        reach.push({ c: f.c, r: f.r, R: ZONE[f.hidden] });
+        used.add(f);
+        grew = true;
+      }
+    }
+  }
+  return reach;
+}
+
+// Never leave a player boxed in: unit-building flag towers must chain from the
+// home base across the centre row. Fix the map (mirrored) until they do.
+function ensureUnitChain() {
+  const mid = HALF_ROWS - 1;
+  for (let guard = 0; guard < 12; guard++) {
+    const reach = unitReach('blue');
+    if (Math.min(...reach.map((n) => n.r - n.R)) < mid) return true;
+    const cands = [];
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      if (S.terrain[r][c] !== 'ground' || !reach.some((n) => cheb(n, c, r) <= n.R)) continue;
+      const e = entityAt(c, r);
+      if (e && (e.team || (e.kind === 'flag' && GROUP_OF[e.hidden] === 'unit'))) continue;
+      cands.push({ c, r, pref: !e ? 1 : e.kind === 'flag' ? 0 : 2, k: Math.random() });
+    }
+    if (!cands.length) return false;
+    // push toward the enemy; re-roll a flag first, then use an empty tile, rocks last
+    cands.sort((a, b) => (a.r - b.r) || (a.pref - b.pref) || (a.k - b.k));
+    const { c, r } = cands[0];
+    const hidden = rollKind('unit');
+    for (const [cc, rr] of [[c, r], [COLS - 1 - c, ROWS - 1 - r]]) {
+      const e = entityAt(cc, rr);
+      if (e && e.kind === 'flag') { e.hidden = hidden; continue; }
+      if (e) removeEntity(e);
+      const band = [HOME.blue, HOME.red].some(([hc, hr]) => Math.max(Math.abs(hc - cc), Math.abs(hr - rr)) <= 1) ? 0 : rr === mid ? 2 : 1;
+      addEntity('flag', null, cc, rr, [5, 10, 15][band], hidden);
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- effects
@@ -695,23 +891,23 @@ function toScreen(x, y, z) {
   tmpV.set(x, y, z).project(camera);
   return { x: (tmpV.x + 1) / 2 * app.clientWidth, y: (1 - tmpV.y) / 2 * app.clientHeight, behind: tmpV.z > 1 };
 }
-function floatText(x, y, z, text, cls = '') {
+function floatText(x, y, z, text, cls = '', life = 1000) {
   const p = toScreen(x, y, z);
   const el = document.createElement('div');
   el.className = 'float ' + cls;
   el.innerHTML = text;
   el.style.transform = `translate(${p.x}px, ${p.y}px) translate(-50%, -50%)`;
   floatsEl.appendChild(el);
-  setTimeout(() => el.remove(), 1000);
+  setTimeout(() => el.remove(), life);
 }
 const BRICK = '<i class="brick"></i>';
 
 let toastTimer = 0;
-function toast(msg) {
+function toast(msg, ms = 1500) {
   toastEl.textContent = msg;
   toastEl.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1500);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms);
 }
 
 // ---------------------------------------------------------------- combat
@@ -729,15 +925,12 @@ function earn(team, n, x, y, z) {
 
 function damage(e, amount, team) {
   if (!e.alive) return;
-  let dealt = 0;
-  for (let i = 0; i < amount && e.hp > 0; i++) {
-    if (e.shield > 0) e.shield--; else e.hp--;
-    dealt++;
-  }
+  const dealt = Math.min(amount, e.hp);
+  e.hp -= dealt;
   e.bump = 1;
   const h = entHeight(e);
-  earn(team, dealt, e.x, h + 0.3, e.z);
-  burst(e.x, h * 0.7, e.z, e.kind === 'rock' ? M.ROCK_COLOR : M.TEAM[e.team].body, 3, 0.6);
+  if (e.kind !== 'flag') earn(team, dealt, e.x, h + 0.3, e.z);   // flag towers pay with a building, not bricks
+  burst(e.x, h * 0.6, e.z, entColor(e), 3, 0.6);
   if (e.hp <= 0) destroy(e, team);
   else {
     if (isSender(e) && outLinks(e) > linkSlots(e)) {
@@ -752,28 +945,64 @@ function damage(e, amount, team) {
 
 function destroy(e, byTeam) {
   const h = entHeight(e);
-  const color = e.kind === 'rock' ? M.ROCK_COLOR : M.TEAM[e.team].body;
-  burst(e.x, h / 2, e.z, color, 18, 1.3);
+  burst(e.x, h / 2, e.z, entColor(e), 18, 1.3);
   burst(e.x, h / 2, e.z, 0x9a9ea6, 6, 1);
-  shake = Math.max(shake, e.kind === 'rock' ? 0.08 : 0.18);
+  shake = Math.max(shake, e.team ? 0.18 : 0.08);
   if (e.team && byTeam === 'blue') S.stats.destroyed++;
   if (e.team === 'blue') S.stats.lost++;
+  const { c, r, kind, team, hidden } = e;
   removeEntity(e);
+  if (kind === 'flag') {
+    if (byTeam) unlock(hidden, byTeam, c, r, 'flag');
+  } else if (kind === 'rock') {
+    if (Math.random() < REVEAL_CHANCE) spawnFlag(c, r, START_HP, byTeam);
+  } else if (team && byTeam && team !== byTeam && Math.random() < REVEAL_CHANCE) {
+    unlock(rollKind(), byTeam, c, r, 'enemy');
+  }
+  rebuildTerritory();
   updateHud();
+}
+
+// A new building pops out of the rubble for `team`.
+function unlock(kind, team, c, r, via) {
+  const e = addEntity(kind, team, c, r, START_HP);
+  e.pop = 1;
+  burst(e.x, 0.3, e.z, M.TEAM[team].body, 14, 1.1);
+  burst(e.x, 0.3, e.z, 0xffe066, 8, 0.9);
+  shake = Math.max(shake, 0.12);
+  const who = team === 'blue' ? (via === 'enemy' ? 'CAPTURED!' : 'UNLOCKED!') : 'CPU GOT';
+  floatText(e.x, 1.1, e.z, `<span>${who}</span><b>${INFO[kind].name}</b>`, 'unlock ' + team, 1900);
+  if (team === 'blue') {
+    S.stats.unlocked++;
+    queueTip('unlock:' + kind);
+    if (via === 'enemy') queueTip('enemyCapture');
+  }
+  return e;
+}
+
+function spawnFlag(c, r, hp, byTeam, kind = rollKind()) {
+  const e = addEntity('flag', null, c, r, hp, kind);
+  e.pop = 1;
+  burst(e.x, 0.2, e.z, 0xc4c8ce, 8, 0.7);
+  floatText(e.x, 1.2, e.z, '?', 'reveal', 1100);
+  if (byTeam === 'blue') queueTip('rockReveal');
+  return e;
 }
 
 // n units' worth of supplies arriving at a friendly building
 function friendlyDelivery(e, team, n = 1) {
   const h = entHeight(e);
-  if (isSender(e) || e.kind === 'arrow') {
+  if (isSender(e)) {
     if (e.hp < MAX_HP) {
-      const floorsBefore = Math.ceil(e.hp / 5);
+      const floorsBefore = floorsOf(e);
       e.hp = Math.min(MAX_HP, e.hp + n);
       e.bump = 0.6;
-      if (team === 'blue' && isSender(e) && Math.ceil(e.hp / 5) > floorsBefore) floatText(e.x, h + 0.4, e.z, '+1 floor', 'heal');
+      if (team === 'blue' && isSender(e) && floorsOf(e) > floorsBefore) floatText(e.x, h + 0.4, e.z, '+1 floor', 'heal');
     }
-  } else if (e.kind === 'cannon') {
+  } else if (isArtillery(e)) {
     e.ammo += n;
+    e.bump = 0.6;
+    if (team === 'blue') floatText(e.x, h + 0.35, e.z, `+${n} ●`, 'heal');
   } else if (e.kind === 'quarry') {
     earn(team, QUARRY_YIELD * n, e.x, h + 0.3, e.z);
     e.bump = 0.6;
@@ -862,7 +1091,7 @@ function fireBullet(u, target) {
 
 // Straight shot from a tower. Cannon balls stop at the first thing in line,
 // arrows pierce everything until a mountain or the board edge.
-function fireShot(kind, src, tx, tz) {
+function fireShot(kind, src, tx, tz, aim = null) {
   let dx = tx - src.x, dz = tz - src.z;
   const L = Math.hypot(dx, dz) || 1;
   dx /= L; dz /= L;
@@ -887,7 +1116,7 @@ function fireShot(kind, src, tx, tz) {
   S.projectiles.push({
     kind, mesh, team: src.team, src, x: src.x, z: src.z, y, dx, dz,
     speed: kind === 'ball' ? CANNON_SPEED : ARROW_SPEED,
-    maxDist: kind === 'ball' ? CANNON_RANGE + 0.6 : Infinity, traveled: 0, hit: new Set(),
+    reach: zoneOf(src) + 0.5, hit: new Set(), aim: aim && aim.team === src.team ? aim : null,
   });
   src.bump = 0.5;
 }
@@ -935,7 +1164,7 @@ function updateProjectiles(dt) {
       if (q.d < 0.22) hits.push({ t: q.t, unit: u });
     }
     for (const e of S.ents) {
-      if (e.team === pr.team || e === pr.src || pr.hit.has(e)) continue;
+      if ((e.team === pr.team && e !== pr.aim) || e === pr.src || pr.hit.has(e) || !inZone(pr.src, e)) continue;
       if (segHitsBox(x1, z1, x2, z2, e.x, e.z, BLOCK_HALF)) hits.push({ t: pointSegDist(e.x, e.z, x1, z1, x2, z2).t, ent: e });
     }
     const wall = segHitsMountain(x1, z1, x2, z2);
@@ -945,41 +1174,61 @@ function updateProjectiles(dt) {
       if (wall !== null && h.t > wall) break;
       pr.hit.add(h.unit || h.ent);
       if (h.unit) hurtUnit(h.unit, 1, pr.team);
+      else if (h.ent.team === pr.team) boost(h.ent, pr.team);
       else damage(h.ent, pr.kind === 'ball' ? CANNON_DMG : 1, pr.team);
       if (pr.kind === 'ball') { stop = true; break; }
     }
     pr.x = x2; pr.z = z2;
-    pr.traveled += step;
     pr.mesh.position.set(x2, pr.y, z2);
     if (wall !== null) stop = true;
-    if (Math.abs(x2) > hw || Math.abs(z2) > hh || pr.traveled > pr.maxDist) stop = true;
+    // arrows pierce, but only until they leave the tower's zone
+    if (Math.abs(x2) > hw || Math.abs(z2) > hh || Math.max(Math.abs(x2 - pr.src.x), Math.abs(z2 - pr.src.z)) > pr.reach) stop = true;
     if (stop) {
       scene.remove(pr.mesh);
       S.projectiles.splice(i, 1);
-      burst(x2, pr.y, z2, pr.kind === 'ball' ? 0x3a3d44 : 0x8a5a2b, pr.kind === 'ball' ? 5 : 2, 0.7);
+      // arrows snap apart at the end of their range
+      if (pr.kind === 'ball') burst(x2, pr.y, z2, 0x3a3d44, 5, 0.7);
+      else { burst(x2, pr.y, z2, 0x8a5a2b, 5, 0.6); burst(x2, pr.y, z2, 0xe8e0cc, 2, 0.5); }
     }
   }
 }
 
-// Towers aim at the nearest enemy unit, then enemy building, then rock.
-function towerTarget(src, range) {
+// A friendly unit building hit by an aimed shot gains 1 hp (floors every 5).
+function boost(e, team) {
+  if (e.hp >= MAX_HP) return;
+  const before = floorsOf(e);
+  e.hp += 1;
+  e.bump = 0.6;
+  burst(e.x, entHeight(e), e.z, 0x8fe3ff, 3, 0.5);
+  if (team === 'blue' && floorsOf(e) > before) floatText(e.x, entHeight(e) + 0.4, e.z, '+1 floor', 'heal');
+  refreshEntity(e);
+}
+
+// Artillery fires at its aimed target if it has one. Otherwise: the nearest
+// enemy unit in its zone, then whatever is nearest (never your own buildings).
+function towerTarget(src) {
+  const aim = S.paths.find((p) => p.from === src);
+  if (aim && aim.to.alive) return aim.to;
+  const R = zoneOf(src);
   let best = null, bd = Infinity;
   for (const u of S.units) {
     if (!u.alive || u.team === src.team) continue;
     const p = unitPos(u);
+    if (Math.max(Math.abs(p.x - src.x), Math.abs(p.z - src.z)) > R + 0.5) continue;
     const d = Math.hypot(p.x - src.x, p.z - src.z);
-    if (d <= range && d < bd && losClear(src, p, 'air')) { bd = d; best = { x: p.x, z: p.z }; }
+    if (d < bd && losClear(src, p, 'air')) { bd = d; best = { x: p.x, z: p.z }; }
   }
   if (best) return best;
   for (const e of S.ents) {
-    if (e.team === src.team) continue;
-    const d = dist(src, e) + (e.kind === 'rock' ? 100 : 0);
-    if (dist(src, e) <= range && d < bd && losClear(src, e, 'air')) { bd = d; best = e; }
+    if (e.team === src.team || !inZone(src, e)) continue;
+    const d = dist(src, e);
+    if (d < bd && losClear(src, e, 'air')) { bd = d; best = e; }
   }
   return best;
 }
 
 function updateBattle(dt) {
+  if (S.battleHold > 0) { S.battleHold -= dt; return; }
   S.battleT += dt;
   // spawn
   for (let i = S.spawns.length - 1; i >= 0; i--) {
@@ -1066,32 +1315,22 @@ function updateBattle(dt) {
   }
   S.units = S.units.filter((u) => u.alive);
 
-  // towers
-  const unitsActive = S.spawns.length > 0 || S.units.length > 0;
+  // artillery: one shot per point of ammo
   for (const e of [...S.ents]) {
-    if (!e.alive) continue;
+    if (!e.alive || !isArtillery(e)) continue;
     e.cd -= dt;
-    if (e.cd > 0) continue;
-    if (e.kind === 'cannon' && e.ammo > 0) {
-      const tgt = towerTarget(e, CANNON_RANGE);
-      if (tgt) {
-        e.ammo--;
-        e.cd = CANNON_RATE;
-        fireShot('ball', e, tgt.x, tgt.z);
-        refreshEntity(e);
-      }
-    } else if (e.kind === 'arrow' && unitsActive) {
-      const tgt = towerTarget(e, ARROW_RANGE);
-      if (tgt) {
-        e.cd = ARROW_RATE;
-        fireShot('arrow', e, tgt.x, tgt.z);
-      }
-    }
+    if (e.cd > 0 || e.ammo <= 0) continue;
+    const tgt = towerTarget(e);
+    if (!tgt) continue;
+    e.ammo--;
+    e.cd = e.kind === 'cannon' ? CANNON_RATE : ARROW_RATE;
+    fireShot(e.kind === 'cannon' ? 'ball' : 'arrow', e, tgt.x, tgt.z, tgt.alive !== undefined ? tgt : null);
+    refreshEntity(e);
   }
   updateProjectiles(dt);
   S.units = S.units.filter((u) => u.alive);
 
-  const cannonsBusy = S.ents.some((e) => e.kind === 'cannon' && e.ammo > 0 && towerTarget(e, CANNON_RANGE));
+  const cannonsBusy = S.ents.some((e) => isArtillery(e) && e.ammo > 0 && towerTarget(e));
   const busy = S.spawns.length || S.units.length || S.projectiles.length || cannonsBusy;
   if (!busy) {
     S.settle += dt;
@@ -1102,21 +1341,24 @@ function updateBattle(dt) {
 // ---------------------------------------------------------------- CPU
 function cpuConnect() {
   const team = 'red';
-  const maxNew = 2 + Math.floor(S.round / 3);
+  const maxNew = Math.min(Math.floor(S.bricks.red / PATH_COST), 2 + Math.floor(S.round / 3));
   const cands = [];
   for (const src of buildings(team).filter(isSender)) {
     const heavy = src.kind !== 'squad';
     for (const t of S.ents) {
       if (t === src || findPath(src, t)) continue;
-      if (dist(src, t) > rangeOf(src.kind) + 0.01 || !losClear(src, t, losMode(src))) continue;
+      if (!inZone(src, t) || !losClear(src, t, losMode(src))) continue;
       let score;
-      if (t.kind === 'rock') score = 6 + (t.hp <= 10 ? 3 : 0) - t.hp * 0.1 + (heavy && t.hp >= 10 ? 3 : 0);
-      else if (t.team !== team) {
+      if (t.kind === 'flag') {
+        score = 16 + Math.max(0, 15 - t.hp) * 0.3 + (S.paths.some((p) => p.team === 'blue' && p.to === t) ? 3 : 0);
+      } else if (t.kind === 'rock') {
+        score = 6 + (t.hp <= 5 ? 3 : 0) - t.hp * 0.1 + (S.bricks.red < 4 ? 3 : 0) + (heavy && t.hp >= 10 ? 2 : 0);
+      } else if (t.team !== team) {
         score = 14 + Math.max(0, 20 - t.hp) * 0.3 + (isSender(t) ? 2 : 0) + (heavy ? 3 : 0);
         if (findPath(t, src)) score += 5;  // meet the attack head-on
       } else {
         if (findPath(t, src)) continue;
-        if (t.kind === 'cannon') score = towerTarget(t, CANNON_RANGE) ? 10 : 1;
+        if (isArtillery(t)) score = towerTarget(t) ? 10 : 1;
         else if (t.kind === 'quarry') score = 8;
         else score = t.hp < 10 ? 5 : 0.5;
       }
@@ -1132,122 +1374,6 @@ function cpuConnect() {
   }
 }
 
-function cpuBuild() {
-  const team = 'red';
-  const hand = [...S.hand.red];
-  const mine = buildings(team);
-  const senders = mine.filter(isSender);
-  const threatened = mine.filter((e) => S.paths.some((p) => p.team === 'blue' && p.to === e)).sort((a, b) => a.hp - b.hp);
-  const blueArrows = S.ents.some((e) => e.team === 'blue' && e.kind === 'arrow');
-  const pri = (k) => ({
-    squad: senders.length < 3 ? 9 : 4,
-    tank: (blueArrows ? 8 : 5) + (senders.length < 3 ? 2 : 0),
-    heli: 5 + (senders.length >= 2 ? 1 : 0),
-    cannon: mine.some((e) => e.kind === 'cannon') ? 4 : 6,
-    arrow: threatened.length ? 7 : 2,
-    quarry: mine.some((e) => e.kind === 'quarry') ? 2 : 5,
-    shield: threatened.some((e) => !e.shield) ? 8 : 0,
-  })[k] + Math.random() * 2;
-  hand.sort((a, b) => pri(b) - pri(a));
-  let built = 0;
-  for (const kind of hand) {
-    if (built >= 2) break;
-    if (S.bricks.red < CARDS[kind].cost) continue;
-    if (pri(kind) < 2) continue;
-    let spot = null;
-    if (kind === 'shield') {
-      const t = threatened.find((e) => !e.shield);
-      if (t) spot = [t.c, t.r];
-    } else {
-      spot = cpuPickTile(kind, senders);
-    }
-    if (spot && place(team, kind, spot[0], spot[1])) built++;
-  }
-}
-
-function cpuPickTile(kind, senders) {
-  let best = null, bs = -Infinity;
-  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-    if (canPlace('red', kind, c, r) !== true) continue;
-    const p = { x: cx(c), z: cz(r) };
-    if (!senders.some((n) => dist(n, p) <= 2.6)) continue;
-    const feeder = senders.some((n) => dist(n, p) <= rangeOf(n.kind) + 0.01 && losClear(n, p, losMode(n)));
-    let score = Math.random() * 1.5;
-    if (kind === 'squad' || kind === 'tank' || kind === 'heli') {
-      const mode = kind === 'heli' ? 'air' : 'ground';
-      const around = S.ents.filter((e) => dist(e, p) <= rangeOf(kind) + 0.01 && losClear(p, e, mode));
-      score += around.filter((e) => e.kind === 'rock').length + around.filter((e) => e.team === 'blue').length * 2 + r * 0.25;
-      if (kind === 'heli') score += around.filter((e) => e.team === 'blue' && !losClear(p, e, 'ground')).length * 2;
-    } else if (kind === 'cannon') {
-      if (!feeder) continue;
-      score += S.ents.filter((e) => e.team === 'blue' && dist(e, p) <= CANNON_RANGE).length * 3
-        + S.ents.filter((e) => e.kind === 'rock' && dist(e, p) <= CANNON_RANGE).length * 0.4;
-    } else if (kind === 'quarry') {
-      if (!feeder) continue;
-      score += 4 - r * 0.3;
-    } else if (kind === 'arrow') {
-      score += S.paths.filter((q) => q.team === 'blue' && q.to.team === 'red' && dist(q.to, p) <= ARROW_RANGE).length * 3;
-    }
-    if (score > bs) { bs = score; best = [c, r]; }
-  }
-  return best;
-}
-
-// ---------------------------------------------------------------- building placement
-function canPlace(team, kind, c, r) {
-  if (!inBounds(c, r)) return 'Off the board';
-  const e = entityAt(c, r);
-  if (kind === 'shield') {
-    if (!e || e.team !== team) return 'Drop on your building';
-    if (e.shield > 0) return 'Already shielded';
-    return true;
-  }
-  const t = terrainAt(c, r);
-  if (t === 'water') return "Can't build on water";
-  if (t === 'mountain') return "Can't build on mountains";
-  if (e) return 'Tile occupied';
-  if (pathCrossesCell(c, r)) return 'A path crosses this tile';
-  return true;
-}
-
-function place(team, kind, c, r) {
-  if (canPlace(team, kind, c, r) !== true) return false;
-  if (S.bricks[team] < CARDS[kind].cost) return false;
-  S.bricks[team] -= CARDS[kind].cost;
-  const idx = S.hand[team].indexOf(kind);
-  if (idx >= 0) S.hand[team].splice(idx, 1);
-  if (kind === 'shield') {
-    const e = entityAt(c, r);
-    e.shield = SHIELD_HP;
-    e.bump = 1;
-    refreshEntity(e);
-    burst(e.x, 0.3, e.z, 0x8fdcff, 8, 0.7);
-  } else {
-    const e = addEntity(kind, team, c, r, CARDS[kind].hp);
-    e.pop = 1;
-    burst(e.x, 0.1, e.z, 0xe0a060, 8, 0.6);
-  }
-  updateHud();
-  return true;
-}
-
-function drawHand() {
-  const bag = [];
-  for (const [k, w] of Object.entries(DECK)) for (let i = 0; i < w; i++) bag.push(k);
-  const pick = () => {
-    const h = [];
-    const pool = [...bag];
-    for (let i = 0; i < 4; i++) h.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
-    if (!h.some((k) => SENDER_KINDS.includes(k))) {
-      const senders = bag.filter((k) => SENDER_KINDS.includes(k));
-      h[Math.floor(Math.random() * h.length)] = senders[Math.floor(Math.random() * senders.length)];
-    }
-    return h;
-  };
-  S.hand.blue = pick();
-  S.hand.red = pick();
-}
-
 // ---------------------------------------------------------------- phases
 function startMatch() {
   for (const e of S ? [...S.ents] : []) { scene.remove(e.obj); e.label.remove(); }
@@ -1255,29 +1381,34 @@ function startMatch() {
   for (const p of S ? S.projectiles : []) scene.remove(p.mesh);
   cancelDrag();
   S = newState();
+  terrKey.blue = terrKey.red = '';
   generateMap();
   rebuildPaths();
+  rebuildTerritory();
   startConnect();
 }
 
-function startBuild() {
-  S.phase = 'build';
-  S.timer = PHASE_TIME;
-  S.selected = -1;
-  drawHand();
-  renderPanel();
-  updateHud();
-}
-function endBuild() {
-  cancelDrag();
-  cpuBuild();
-  startConnect();
+// Nobody gets soft-locked: a team with no paths and too few bricks for one
+// gets topped up so it can always draw at least one path.
+function supplyDrop() {
+  for (const team of ['blue', 'red']) {
+    if (S.bricks[team] >= PATH_COST || S.paths.some((p) => p.team === team) || !buildings(team).some(canSource)) continue;
+    const n = PATH_COST - S.bricks[team];
+    S.bricks[team] = PATH_COST;
+    if (team === 'blue') {
+      const home = buildings('blue').find(canSource);
+      setTimeout(() => floatText(home.x, entHeight(home) + 0.5, home.z, `SUPPLY +${n}${BRICK}`, 'heal', 1600), 700);
+      queueTip('supply');
+    }
+  }
 }
 
 function startConnect() {
   S.phase = 'connect';
   S.timer = PHASE_TIME;
-  renderPanel();
+  if (S.round > 1) supplyDrop();
+  if (S.round > 1 && S.bricks.blue < PATH_COST) queueTip('broke');
+  showBanner('ARRANGE', S.round === 1 ? 'Connect your buildings' : `Round ${S.round} • draw paths, then READY`);
   updateHud();
 }
 function endConnect() {
@@ -1288,15 +1419,18 @@ function endConnect() {
 
 function startBattle() {
   S.phase = 'battle';
+  S.battleHold = 1.3;
+  showBanner('BATTLE!', 'Units attack', 'battle');
   S.battleT = 0;
   S.settle = 0;
   S.earned = 0;
   S.spawns = [];
   for (const p of S.paths) {
+    if (!isSender(p.from)) continue;   // artillery aim lines carry no units
     const n = unitsPerTurn(p.from);
     for (let i = 0; i < n; i++) S.spawns.push({ path: p, t: 0.4 + i * UNIT_TYPES[p.from.kind].gap });
   }
-  renderPanel();
+  if (S.paths.some((p) => p.team === 'blue')) queueTip('firstBattle', 1700);
   updateHud();
 }
 
@@ -1310,23 +1444,21 @@ function endBattle() {
     else if (b !== r) win = b > r;
     else win = buildings('blue').reduce((s, e) => s + e.hp, 0) >= buildings('red').reduce((s, e) => s + e.hp, 0);
     S.phase = 'over';
-    renderPanel();
     updateHud();
     setTimeout(() => showResult(win, b, r), 600);
     return;
   }
   S.round++;
-  startBuild();
+  startConnect();
 }
 
 function endPhase() {
-  if (S.phase === 'build') endBuild();
-  else if (S.phase === 'connect') endConnect();
+  if (S.phase === 'connect') endConnect();
 }
-endBtn.addEventListener('click', endPhase);
+goBtn.addEventListener('click', () => { if (S && !S.paused) endPhase(); });
 
-// ---------------------------------------------------------------- HUD / panel
-const PHASE_NAME = { build: 'BUILD', connect: 'CONNECT', battle: 'BATTLE', over: 'GAME OVER', intro: 'READY' };
+// ---------------------------------------------------------------- HUD
+const PHASE_NAME = { connect: 'CONNECT', battle: 'BATTLE', over: 'GAME OVER', intro: 'READY' };
 let lastTimerText = '';
 function updateHud() {
   if (!S) return;
@@ -1334,85 +1466,46 @@ function updateHud() {
   $('brickCount').textContent = S.bricks.blue;
   $('blueCount').textContent = buildings('blue').length;
   $('redCount').textContent = buildings('red').length;
+  const connecting = S.phase === 'connect';
+  const hasPath = S.paths.some((p) => p.team === 'blue');
+  // first turn: READY only shows up once you've drawn a path
+  const ready = connecting && (S.round > 1 || hasPath);
+  goBtn.classList.toggle('show', ready);
+  goBtn.classList.toggle('pulse', ready && S.round === 1);
+  modePill.className = 'mode-pill';
+  if (S.phase === 'battle') { modePill.textContent = '⚔ BATTLE'; modePill.classList.add('show', 'battle'); }
+  else if (connecting && !ready) { modePill.textContent = 'DRAW A PATH'; modePill.classList.add('show', 'hint'); }
+  app.classList.toggle('mode-battle', S.phase === 'battle');
+  $('phasePill').classList.toggle('battle', S.phase === 'battle');
   updateTimer();
-  if (S.phase === 'build') refreshCards();
-  if (S.phase === 'battle') {
-    const el = $('earned');
-    if (el) el.textContent = `+${S.earned}`;
-  }
 }
+
+// Big ribbon across the board when the mode changes. Waits for any open popup.
+let pendingBanner = null;
+function showBanner(title, sub, cls = '') {
+  if (modal.classList.contains('open')) { pendingBanner = [title, sub, cls]; return; }
+  pendingBanner = null;
+  bannerEl.querySelector('b').textContent = title;
+  bannerEl.querySelector('span').textContent = sub;
+  bannerEl.className = 'banner ' + cls;
+  void bannerEl.offsetWidth;
+  bannerEl.classList.add('show');
+}
+bannerEl.addEventListener('animationend', () => bannerEl.classList.remove('show'));
 function updateTimer() {
   let t;
-  if (S.phase === 'build' || S.phase === 'connect') t = `${PHASE_NAME[S.phase]} • ${Math.ceil(S.timer)}s`;
-  else if (S.phase === 'battle') t = 'UNITS MOVING';
+  if (S.phase === 'connect') t = S.round === 1 ? 'CONNECT • NO RUSH' : `CONNECT • ${Math.ceil(S.timer)}s`;
+  else if (S.phase === 'battle') t = `BATTLE • +${S.earned}`;
   else t = `ROUND ${S.round} / ${MAX_ROUNDS}`;
   if (t !== lastTimerText) {
-    $('timerText').textContent = t;
+    $('timerText').innerHTML = S.phase === 'battle' ? `${t} ${BRICK}` : t;
     lastTimerText = t;
-    document.querySelector('.timer-pill').classList.toggle('hurry', (S.phase === 'build' || S.phase === 'connect') && S.timer <= 5);
+    document.querySelector('.timer-pill').classList.toggle('hurry', S.phase === 'connect' && S.round > 1 && S.timer <= 5);
   }
-}
-
-let icons = {};
-function renderPanel() {
-  panelBody.innerHTML = '';
-  if (S.phase === 'build') {
-    panelTitle.textContent = 'DRAW COMPLETE • CHOOSE A CARD';
-    S.hand.blue.forEach((kind, i) => {
-      const el = document.createElement('div');
-      el.className = 'card';
-      el.dataset.idx = i;
-      el.innerHTML = `<img src="${icons[kind]}" alt=""><div class="nm">${CARDS[kind].name}</div><div class="cost">${BRICK}${CARDS[kind].cost}</div>`;
-      el.addEventListener('pointerdown', (ev) => cardDown(ev, i));
-      panelBody.appendChild(el);
-    });
-    for (let i = S.hand.blue.length; i < 4; i++) {
-      const el = document.createElement('div');
-      el.className = 'card empty';
-      el.textContent = 'BUILT';
-      panelBody.appendChild(el);
-    }
-    endBtn.textContent = 'END BUILD';
-    endBtn.disabled = false;
-    refreshCards();
-  } else if (S.phase === 'connect') {
-    panelTitle.textContent = S.round === 1 ? 'OPENING ROUND • CONNECT FIRST' : 'CONNECT • DRAG A PATH';
-    panelBody.innerHTML = `
-      <div class="info"><div class="big">FREE</div><div class="small">drawing<br>paths</div></div>
-      <div class="info"><div class="big">${UNITS_PER_PATH}</div><div class="small">soldiers or 1<br>vehicle / floor</div></div>
-      <div class="info wide">
-        <p>Drag from a <b>squad, tank or heli</b> to a target in range.</p>
-        <p>1 path per floor (max ${MAX_LINKS}). Swipe across a path to cut it.</p>
-      </div>`;
-    endBtn.textContent = 'END TURN';
-    endBtn.disabled = false;
-  } else if (S.phase === 'battle') {
-    panelTitle.textContent = 'BATTLE • UNITS ON THE MOVE';
-    const count = (team) => S.paths.filter((p) => p.team === team).reduce((n, p) => n + unitsPerTurn(p.from), 0);
-    panelBody.innerHTML = `
-      <div class="info"><div class="big"><span class="swatch" style="background:#1f6dff"></span>${count('blue')}</div><div class="small">your units</div></div>
-      <div class="info"><div class="big"><span class="swatch" style="background:#e4222e"></span>${count('red')}</div><div class="small">enemy units</div></div>
-      <div class="info"><div class="big">${BRICK}<span id="earned">+0</span></div><div class="small">bricks earned</div></div>`;
-    endBtn.textContent = 'BATTLE…';
-    endBtn.disabled = true;
-  } else {
-    panelTitle.textContent = 'MATCH OVER';
-    endBtn.textContent = 'PLAY AGAIN';
-    endBtn.disabled = true;
-  }
-}
-
-function refreshCards() {
-  panelBody.querySelectorAll('.card:not(.empty)').forEach((el) => {
-    const i = +el.dataset.idx;
-    const kind = S.hand.blue[i];
-    if (!kind) return;
-    el.classList.toggle('poor', S.bricks.blue < CARDS[kind].cost);
-    el.classList.toggle('sel', S.selected === i);
-  });
 }
 
 // ---------------------------------------------------------------- icons (rendered from the real models)
+const ICON_KINDS = ['squad', 'tank', 'heli', 'cannon', 'arrow', 'quarry', 'flag', 'rock'];
 function renderIcons() {
   const size = 200;
   const r = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -1426,19 +1519,8 @@ function renderIcons() {
   sc.add(sun);
   const cam = new THREE.PerspectiveCamera(28, 1, 0.1, 50);
   const out = {};
-  for (const kind of Object.keys(CARDS)) {
-    let model;
-    if (kind === 'shield') {
-      model = new THREE.Group();
-      const inner = M.makeSender('blue', 'squad');
-      inner.userData.setFloors(1);
-      model.add(inner);
-      const sh = M.makeShield();
-      sh.userData.setHeight(0.32);
-      model.add(sh);
-    } else {
-      model = M.makeModel(kind, 'blue');
-    }
+  for (const kind of ICON_KINDS) {
+    const model = M.makeModel(kind, 'blue');
     sc.add(model);
     const h = model.userData.getHeight ? model.userData.getHeight() : 0.65;
     const look = new THREE.Vector3(0.04, h * 0.45, 0);
@@ -1453,6 +1535,7 @@ function renderIcons() {
   r.forceContextLoss();
   return out;
 }
+let icons = {};
 
 // ---------------------------------------------------------------- input
 const raycaster = new THREE.Raycaster();
@@ -1473,7 +1556,7 @@ function cellAt(pt) {
   const c = Math.round(pt.x + (COLS - 1) / 2), r = Math.round(pt.z + (ROWS - 1) / 2);
   return inBounds(c, r) ? { c, r } : null;
 }
-function pickEntity(ev) {
+function pickEntity(ev, meshOnly = false) {
   setRay(ev);
   const hits = raycaster.intersectObjects(S.ents.map((e) => e.obj), true);
   for (const h of hits) {
@@ -1481,11 +1564,9 @@ function pickEntity(ev) {
     while (o && !o.userData.ent) o = o.parent;
     if (o && o.userData.ent.alive) return o.userData.ent;
   }
+  if (meshOnly) return null;
   const cell = cellAt(groundPoint(ev));
   return cell ? entityAt(cell.c, cell.r) : null;
-}
-function overPanel(ev) {
-  return ev.clientY > panel.getBoundingClientRect().top;
 }
 
 let drag = null;
@@ -1495,7 +1576,7 @@ function showBubble(text, x, y, cls = '') {
   bubble.className = 'bubble ' + cls;
   const half = bubble.offsetWidth / 2 + 6;
   x = Math.min(app.clientWidth - half, Math.max(half, x));
-  bubble.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%)`;
+  bubble.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${cls.includes('below') ? 0 : -100}%)`;
 }
 function hideBubble() { bubble.classList.add('hidden'); }
 function appXY(ev) {
@@ -1503,50 +1584,58 @@ function appXY(ev) {
   return { x: ev.clientX - r.left, y: ev.clientY - r.top };
 }
 
+function describe(e) {
+  if (e.kind === 'flag') return 'Locked building: break it to unlock it';
+  if (e.kind === 'rock') return 'Rock: every hit = +1 brick';
+  const who = e.team === 'blue' ? '' : 'CPU ';
+  return `${who}${INFO[e.kind].name}: ${INFO[e.kind].line}`;
+}
+
+// valid targets light up while dragging from a sender
+function showTargets(src) {
+  hideMarkers();
+  let i = 0;
+  for (const t of S.ents) {
+    if (t === src) continue;
+    const chk = checkConnect('blue', src, t);
+    if (!chk.ok && !chk.broke) continue;
+    const color = t.kind === 'flag' ? 0xffe066 : t.team === 'blue' ? 0x7fd0ff : t.team === 'red' ? 0xff8a8a : 0xffffff;
+    showMarker(i++, t.c, t.r, color, false, 0.85);
+  }
+  showMarker(i++, src.c, src.r, 0x7fd0ff, false, 1);
+}
+
 canvas.addEventListener('pointerdown', (ev) => {
   if (!S || S.paused) return;
-  if (S.phase === 'connect') {
-    const e = pickEntity(ev);
-    if (e && e.team === 'blue' && isSender(e)) {
-      drag = { type: 'connect', src: e, id: ev.pointerId };
-      showRange(e.x, e.z, rangeOf(e.kind));
-      let i = 0;
-      hideMarkers();
-      for (const t of S.ents) {
-        if (t === e || findPath(e, t)) continue;
-        if (dist(e, t) <= rangeOf(e.kind) + 0.01 && losClear(e, t, losMode(e))) showMarker(i++, t.c, t.r, t.team === 'blue' ? 0x7fd0ff : 0xffffff, false, 0.75);
-      }
-      showMarker(i++, e.c, e.r, 0x7fd0ff, false, 1);
-      e.bump = 0.5;
-    } else if (e && e.team === 'blue') {
-      toast('Only squad, tank or heli buildings send units');
-    } else {
-      // swipe across your own paths to cut them
-      const gp = groundPoint(ev);
-      drag = { type: 'cut', start: gp, last: gp, cut: 0, id: ev.pointerId };
-    }
-  } else if (S.phase === 'build' && S.selected >= 0) {
-    drag = { type: 'tap', x: ev.clientX, y: ev.clientY, id: ev.pointerId };
-  }
-});
-
-function cardDown(ev, i) {
-  if (!S || S.phase !== 'build' || S.paused) return;
-  ev.preventDefault();
-  const kind = S.hand.blue[i];
-  if (S.bricks.blue < CARDS[kind].cost) {
-    const el = ev.currentTarget;
-    el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake');
-    toast('Not enough bricks');
+  const hit = pickEntity(ev, true);
+  const onPath = S.phase === 'connect' && !hit ? pathAt(groundPoint(ev)) : null;
+  const e = hit || (onPath ? null : pickEntity(ev));
+  if (S.phase === 'connect' && e && e.team === 'blue' && canSource(e)) {
+    drag = { type: 'connect', src: e, id: ev.pointerId };
+    showZone(e);
+    showTargets(e);
+    e.bump = 0.5;
     return;
   }
-  drag = { type: 'card', idx: i, kind, x: ev.clientX, y: ev.clientY, moved: false, id: ev.pointerId, el: ev.currentTarget };
-}
+  if (e && e.team && S.phase !== 'over') {
+    // peek at any building's zone
+    drag = { type: 'peek', id: ev.pointerId };
+    showZone(e, e.team === 'blue' ? 0xffffff : 0xffb0b0);
+    toast(describe(e), 2200);
+    return;
+  }
+  if (S.phase === 'connect') {
+    // swipe across your own paths to cut them (a tap describes what's there)
+    const gp = groundPoint(ev);
+    drag = { type: 'cut', start: gp, last: gp, cut: 0, id: ev.pointerId, ent: e, path: onPath, x: ev.clientX, y: ev.clientY };
+  } else if (e) {
+    toast(describe(e), 2200);
+  }
+});
 
 window.addEventListener('pointermove', (ev) => {
   if (!drag || ev.pointerId !== drag.id) return;
   if (drag.type === 'connect') moveConnect(ev);
-  else if (drag.type === 'card') moveCard(ev);
   else if (drag.type === 'cut') moveCut(ev);
 });
 
@@ -1561,14 +1650,15 @@ function moveConnect(ev) {
     drag.tgt = tgt;
     drag.chk = chk;
     const color = chk.ok ? 0x6dff9a : (chk.reason === 'Already connected' ? 0xffffff : 0xff5a5a);
-    setDragLine(src.x, src.z, tgt.x, tgt.z, color, losMode(src));
+    setDragLine(src.x, src.z, tgt.x, tgt.z, color, isArtillery(src) ? 'air' : losMode(src));
     const sp = toScreen(tgt.x, entHeight(tgt) + 0.35, tgt.z);
     showBubble(chk.ok ? chk.verb : (chk.reason || 'Cancel'), sp.x, sp.y - 8, chk.ok ? 'good' : 'bad');
   } else {
     drag.tgt = null;
-    const far = Math.hypot(gp.x - src.x, gp.z - src.z) > rangeOf(src.kind);
+    const cell = cellAt(gp);
+    const far = !cell || cheb(src, cell.c, cell.r) > zoneOf(src);
     setDragLine(src.x, src.z, gp.x, gp.z, far ? 0xff5a5a : 0xffffff, losMode(src));
-    showBubble(far ? 'Out of range' : 'Drag to a target', p.x, p.y - 34, far ? 'bad' : '');
+    showBubble(far ? 'Outside its zone' : 'Drag to a target', p.x, p.y - 34, far ? 'bad' : '');
   }
 }
 
@@ -1591,39 +1681,8 @@ function moveCut(ev) {
     changed = true;
     burst(gp.x, 0.1, gp.z, 0xffffff, 6, 0.6);
   }
-  if (changed) rebuildPaths();
+  if (changed) { rebuildPaths(); updateHud(); }
   drag.last = gp;
-}
-
-function moveCard(ev) {
-  if (!drag.moved && Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) > 8) {
-    drag.moved = true;
-    drag.el.classList.add('dragging');
-    S.selected = -1;
-    refreshCards();
-    if (drag.kind !== 'shield') {
-      drag.ghost = M.makeModel(drag.kind, 'blue');
-      drag.ghost.scale.setScalar(MODEL_SCALE);
-      drag.ghost.traverse((o) => {
-        if (o.isMesh) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.6; o.castShadow = false; }
-      });
-      scene.add(drag.ghost);
-    }
-  }
-  if (!drag.moved) return;
-  hideMarkers();
-  const cell = overPanel(ev) ? null : cellAt(groundPoint(ev));
-  drag.cell = cell;
-  if (drag.ghost) drag.ghost.visible = !!cell;
-  if (!cell) { hideBubble(); rangeRing.visible = rangeFill.visible = false; return; }
-  const ok = canPlace('blue', drag.kind, cell.c, cell.r);
-  showMarker(0, cell.c, cell.r, ok === true ? 0x9ff3ff : 0xff5a5a, true, 1);
-  if (drag.ghost) drag.ghost.position.set(cx(cell.c), 0.05, cz(cell.r));
-  if (drag.kind !== 'shield') showRange(cx(cell.c), cz(cell.r), rangeOf(drag.kind), ok === true ? 0x9ff3ff : 0xff8a8a);
-  const e = entityAt(cell.c, cell.r);
-  const sp = toScreen(cx(cell.c), (e ? entHeight(e) : 0.3) + 0.5, cz(cell.r));
-  const hint = drag.kind === 'shield' ? 'Drop on your building' : 'Place on an empty tile';
-  showBubble(ok === true ? hint : ok, sp.x, sp.y, ok === true ? '' : 'bad');
 }
 
 window.addEventListener('pointerup', (ev) => {
@@ -1633,51 +1692,26 @@ window.addEventListener('pointerup', (ev) => {
     if (d.tgt) {
       const res = connect('blue', d.src, d.tgt);
       if (res.ok) {
-        S.tutorial = false;
-        toast(res.verb);
-      } else if (res.reason && !res.silent) toast(res.reason);
-    }
-  } else if (d.type === 'card') {
-    if (d.moved) {
-      if (d.cell && canPlace('blue', d.kind, d.cell.c, d.cell.r) === true) {
-        place('blue', d.kind, d.cell.c, d.cell.r);
-        renderPanel();
-      } else if (d.cell) toast(canPlace('blue', d.kind, d.cell.c, d.cell.r));
-    } else {
-      S.selected = S.selected === d.idx ? -1 : d.idx;
-      refreshCards();
-      if (S.selected >= 0) toast('Tap a tile to place');
+        if (!seen('firstPath')) { markSeen('firstPath'); queueTip('afterFirstPath'); }
+      } else if (res.reason && !res.silent) {
+        toast(res.reason);
+        if (res.broke) queueTip('broke');
+      }
     }
   } else if (d.type === 'cut') {
+    const tap = Math.hypot(ev.clientX - d.x, ev.clientY - d.y) < 10;
     if (d.cut) toast(`${d.cut} path${d.cut > 1 ? 's' : ''} cut`);
-  } else if (d.type === 'tap' && Math.hypot(ev.clientX - d.x, ev.clientY - d.y) < 10) {
-    tapBoard(ev);
+    else if (tap && d.path && S.paths.includes(d.path)) removePath(d.path);
+    else if (tap && d.ent) toast(describe(d.ent), 2200);
   }
   cancelDrag();
 });
 window.addEventListener('pointercancel', () => cancelDrag());
 
-function tapBoard(ev) {
-  const gp = groundPoint(ev);
-  if (S.phase === 'build' && S.selected >= 0) {
-    const cell = cellAt(gp);
-    const kind = S.hand.blue[S.selected];
-    if (!cell || !kind) return;
-    const ok = canPlace('blue', kind, cell.c, cell.r);
-    if (ok !== true) { toast(ok); return; }
-    if (S.bricks.blue < CARDS[kind].cost) { toast('Not enough bricks'); return; }
-    place('blue', kind, cell.c, cell.r);
-    S.selected = -1;
-    renderPanel();
-  }
-}
-
 function cancelDrag() {
-  if (drag && drag.ghost) scene.remove(drag.ghost);
-  if (drag && drag.el) drag.el.classList.remove('dragging');
   drag = null;
   setDragLine(null);
-  rangeRing.visible = rangeFill.visible = false;
+  hideZone();
   hideMarkers();
   hideBubble();
 }
@@ -1690,11 +1724,11 @@ function fitCamera() {
   camera.aspect = w / h;
   camera.clearViewOffset();
   const appTop = app.getBoundingClientRect().top;
-  const top = $('hudRow2').getBoundingClientRect().bottom - appTop + 6;
-  const bottom = panel.getBoundingClientRect().top - appTop - 4;
-  const availW = w - 4, availH = bottom - top;
-  const hw = COLS / 2 + 0.12, hh = ROWS / 2 + 0.2;
-  const pts = [[-hw, 0, -hh], [hw, 0, -hh], [-hw, 0, hh], [hw, 0, hh], [-hw, 1.1, -hh], [hw, 1.1, -hh]];
+  const top = $('hudRow2').getBoundingClientRect().bottom - appTop + 2;
+  const bottom = h - 10;
+  const availW = w - 6, availH = bottom - top;
+  const hw = COLS / 2 + 0.12, hh = ROWS / 2 + 0.12;
+  const pts = [[-hw, 0, -hh], [hw, 0, -hh], [-hw, 0, hh], [hw, 0, hh], [-hw * 0.6, 1.1, -hh + 0.5], [hw * 0.6, 1.1, -hh + 0.5]];
   const measure = (d) => {
     camera.position.set(0, Math.sin(CAM_PITCH) * d, Math.cos(CAM_PITCH) * d);
     camera.lookAt(0, 0, 0);
@@ -1719,15 +1753,19 @@ function fitCamera() {
   const shiftY = (b.y0 + b.y1) / 2 - (top + bottom) / 2;
   camera.setViewOffset(w, h, 0, shiftY, w, h);
   camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
+  // labels scale with the on-screen size of a cell
+  const a = toScreen(-0.5, 0, 0), c = toScreen(0.5, 0, 0);
+  app.style.setProperty('--k', Math.max(0.85, Math.min(1.6, (c.x - a.x) / 62)).toFixed(3));
 }
 window.addEventListener('resize', fitCamera);
 
 // ---------------------------------------------------------------- per-frame
 function updateLabels() {
   for (const e of S.ents) {
-    // rocks: number on the top face; buildings: label sits just above the roof
-    const rock = e.kind === 'rock';
-    const p = toScreen(e.x, rock ? 0.63 : entHeight(e) + 0.12, e.z);
+    // rocks: number on the top face; flag towers: a sign on the tower; buildings: just above the roof
+    const rock = e.kind === 'rock' || e.kind === 'flag';
+    const p = toScreen(e.x, rock ? 0.62 * MODEL_SCALE : entHeight(e) + 0.08, e.z);
     e.label.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, ${rock ? -50 : -100}%)`;
   }
   for (const u of S.units) {
@@ -1754,21 +1792,48 @@ function animateEntities(dt, time) {
     }
     e.obj.scale.set(sx * MODEL_SCALE, sy * MODEL_SCALE, sx * MODEL_SCALE);
     if (e.kind === 'arrow' && S.phase !== 'battle') e.obj.userData.turret.rotation.y += dt * 0.6;
+    if (e.kind === 'flag') e.obj.userData.flag.rotation.y = Math.sin(time * 2.6 + e.id) * 0.35;
     const roof = e.obj.userData.roof;
     if (roof && roof.userData.rotor) roof.userData.rotor.rotation.y += dt * 4;
   }
 }
 
-function updateHand(time) {
-  const show = S.tutorial && S.phase === 'connect' && !drag && !S.paused;
-  if (!show) { hand.classList.add('hidden'); if (S.phase !== 'connect' || !drag) { /* keep bubble for drags */ } return; }
-  const src = buildings('blue').find(isSender);
-  if (!src) return;
-  if (!S.tutorialTarget || !S.tutorialTarget.alive) {
-    S.tutorialTarget = S.ents.filter((t) => t.kind === 'rock' && dist(src, t) <= rangeOf(src.kind) + 0.01 && losClear(src, t, losMode(src))).sort((a, b) => a.hp - b.hp)[0];
+// Coach hand: until the first path is drawn, show the drag from home to a flag tower.
+function hintPair() {
+  for (const src of buildings('blue').filter(isSender)) {
+    if (outLinks(src) >= linkSlots(src)) continue;
+    const ok = (t) => !findPath(src, t) && inZone(src, t) && losClear(src, t, losMode(src));
+    const t = S.ents.filter((t) => t.kind === 'flag' && ok(t)).sort((a, b) => a.hp - b.hp)[0]
+      || S.ents.filter((t) => t.kind === 'rock' && ok(t)).sort((a, b) => a.hp - b.hp)[0];
+    if (t) return { src, t };
   }
-  const t = S.tutorialTarget;
-  if (!t) return;
+  return null;
+}
+let hintOn = false;
+function updateHand(time) {
+  const first = S.round === 1 && S.phase === 'connect' && !drag && !S.paused;
+  const hasPath = S.paths.some((p) => p.team === 'blue');
+  if (first && hasPath && goBtn.offsetParent) {
+    // point up at READY with a little tap bob
+    hintOn = true;
+    const ar = app.getBoundingClientRect(), br = goBtn.getBoundingClientRect();
+    const x = br.left + br.width / 2 - ar.left, y = br.bottom - ar.top;
+    const bob = Math.abs(Math.sin(time * 4)) * 10;
+    hand.classList.remove('hidden');
+    hand.style.opacity = 1;
+    hand.style.transform = `translate(${x - 14}px, ${y + 2 + bob}px)`;
+    showBubble('Tap READY to start the battle', x, y + 62, 'below');
+    return;
+  }
+  const pair = first && !hasPath && S.bricks.blue >= PATH_COST && hintPair();
+  if (!pair) {
+    hand.classList.add('hidden');
+    if (hintOn && !drag) hideBubble();
+    hintOn = false;
+    return;
+  }
+  hintOn = true;
+  const { src, t } = pair;
   const k = (time % 2.2) / 2.2;
   const e = Math.min(1, Math.max(0, (k - 0.15) / 0.6));
   const ease = e * e * (3 - 2 * e);
@@ -1776,12 +1841,11 @@ function updateHand(time) {
   hand.classList.remove('hidden');
   hand.style.opacity = k > 0.88 ? (1 - (k - 0.88) / 0.12) : 1;
   hand.style.transform = `translate(${a.x + (b.x - a.x) * ease - 14}px, ${a.y + (b.y - a.y) * ease - 4}px)`;
-  const bp = toScreen(t.x, 0.9, t.z);
-  showBubble('Drag to a rock to mine', bp.x, bp.y - 6);
+  const bp = toScreen(t.x, entHeight(t) + 0.45, t.z);
+  showBubble(t.kind === 'flag' ? 'Drag here to capture it!' : 'Drag to a rock to mine it', bp.x, bp.y - 6);
 }
 
 let last = performance.now();
-let tutorialBubbleOn = false;
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -1793,8 +1857,8 @@ function frame(now) {
 
 function update(dt, time) {
   if (S && !S.paused) {
-    if (S.phase === 'build' || S.phase === 'connect') {
-      S.timer -= dt;
+    if (S.phase === 'connect') {
+      if (S.round > 1) S.timer -= dt;   // first turn waits for you
       if (S.timer <= 0) endPhase();
       else updateTimer();
     } else if (S.phase === 'battle') {
@@ -1803,12 +1867,11 @@ function update(dt, time) {
   }
   if (S) {
     for (const p of S.paths) if (p.grow < 1) { p.grow = Math.min(1, p.grow + dt * 4); applyGrow(p); }
+    for (const team of ['blue', 'red']) if (terrGrow[team] < 1) { terrGrow[team] = Math.min(1, terrGrow[team] + dt * 2); applyTerrGrow(team); }
     animateEntities(dt, time);
     updateLabels();
-    const wasTut = tutorialBubbleOn;
-    tutorialBubbleOn = S.tutorial && S.phase === 'connect' && !drag && !S.paused;
     updateHand(time);
-    if (wasTut && !tutorialBubbleOn && !drag) hideBubble();
+    pumpTips();
   }
   dotTex.ground.offset.x -= dt * 1.2;
   dotTex.air.offset.x -= dt * 1.2;
@@ -1827,44 +1890,186 @@ function update(dt, time) {
 }
 
 // ---------------------------------------------------------------- modals
-function openModal(html) {
+let slideNav = null;   // swipe handler for the open slide deck
+function openModal(html, cls = '') {
+  modalBox.className = 'modal-box ' + cls;
   modalBox.innerHTML = html;
   modal.classList.add('open');
+  slideNav = null;
   if (S) S.paused = true;
+  cancelDrag();
 }
 function closeModal() {
   modal.classList.remove('open');
+  slideNav = null;
   if (S) S.paused = false;
+  if (pendingBanner) showBanner(...pendingBanner);
+}
+let swipeX = null;
+modalBox.addEventListener('pointerdown', (ev) => { swipeX = ev.clientX; });
+modalBox.addEventListener('pointerup', (ev) => {
+  if (swipeX == null || !slideNav) return;
+  const dx = ev.clientX - swipeX;
+  swipeX = null;
+  if (Math.abs(dx) > 40) slideNav(dx < 0 ? 1 : -1);
+});
+
+const img = (kind, cls = '') => `<img class="${cls}" src="${icons[kind]}" alt="">`;
+
+// little board sketch: a building, its 3×3 zone in blue dots, flag towers around it
+function zoneArt() {
+  const s = 27, g = 3, o = 3;
+  const at = (i) => o + i * (s + g);
+  let cells = '';
+  for (let r = 0; r < 5; r++) for (let c = 0; c < 5; c++) {
+    cells += `<rect x="${at(c)}" y="${at(r)}" width="${s}" height="${s}" rx="5" fill="${(r + c) % 2 ? '#f3993f' : '#f6a24b'}"/>`;
+  }
+  const z0 = at(1) + 3, z1 = at(4) - g - 3;
+  return `<svg viewBox="0 0 150 150">${cells}
+    <rect x="${z0}" y="${z0}" width="${z1 - z0}" height="${z1 - z0}" rx="6" fill="rgba(47,128,255,.12)" stroke="#2f80ff" stroke-width="4.5" stroke-dasharray="0.1 9" stroke-linecap="round"/>
+    <image href="${icons.squad}" x="${at(2) - 12}" y="${at(2) - 16}" width="52" height="52"/>
+    <image href="${icons.flag}" x="${at(3) - 6}" y="${at(1) - 12}" width="40" height="40"/>
+    <image href="${icons.flag}" x="${at(0) - 6}" y="${at(3) - 12}" width="40" height="40"/>
+    <image href="${icons.rock}" x="${at(1) - 4}" y="${at(3) - 8}" width="36" height="36"/>
+  </svg>`;
 }
 
-const RULES = `
-  <ul>
-    <li><b>Build → Connect → Battle.</b> Both teams act at the same time. Each phase lasts ${PHASE_TIME}s, or press the button to finish early. Round 1 skips Build.</li>
-    <li><b>Connect:</b> drag from a squad, tank or heli building to a rock, enemy or friendly building within range (squads ${SENDER_RANGE.squad} tiles, tanks &amp; helis ${RANGE}). Paths are free. A building gets one path slot per floor (max ${MAX_LINKS}); the circles under its number show free slots. Swipe across a path to cut it.</li>
-    <li><b>Terrain:</b> rocks, buildings and <b>water</b> block ground paths. <b>Helicopters</b> fly over them. <b>Mountains</b> block every path and every shot. You can't build on water or mountains.</li>
-    <li><b>Units:</b> a <b>squad</b> sends ${UNITS_PER_PATH} soldiers (1 hp, 1 dmg each). A <b>tank</b> or <b>heli</b> sends one vehicle with 5 hp that hits for 5 on arrival. Tanks shoot any enemy unit on their path up to 2 tiles ahead; helis shoot ground units on their path. Every floor of the building adds another batch. Each point of damage on a rock, building or enemy unit earns 1 brick. Armies on opposing paths clash in the middle.</li>
-    <li><b>Floors:</b> every building starts with 1 floor (5 hp) and can grow to ${MAX_HP / 5} floors (${MAX_HP} hp). <b>Friendly paths:</b> every 5 hp delivered = +1 floor. Supply a <b>cannon</b> (1 shot per unit) or a <b>quarry</b> (+${QUARRY_YIELD} bricks per unit). Draw a friendly path the other way to reverse it.</li>
-    <li><b>Towers:</b> cannon balls hit the first unit, building or rock in line. <b>Arrows</b> fly to the map edge and hit everything they pass. Both deal 1 damage. <b>Shields</b> go on your building and absorb ${SHIELD_HP} hits.</li>
-    <li>Destroy every enemy building to win, or have the most buildings after ${MAX_ROUNDS} rounds.</li>
-  </ul>`;
+function introSlides(withGuide) {
+  const slides = [
+    {
+      eyebrow: 'HOW IT WORKS • 1',
+      art: zoneArt(),
+      title: 'This is your land',
+      text: `Every building claims the squares around it. The <b>blue dotted line</b> marks your land. A building can only reach what's inside its own square.`,
+    },
+    {
+      eyebrow: 'HOW IT WORKS • 2',
+      art: `${img('flag')}<span class="arrow">➜</span><span class="q">?</span>`,
+      title: 'Capture flag towers',
+      text: `Grey <b>flag towers</b> hide a random building. Drag from your building to one and your units break it. Whatever was inside becomes <b>yours</b>, and your land grows.`,
+    },
+    {
+      eyebrow: 'HOW IT WORKS • 3',
+      art: `<div class="cost">${BRICK}<span>× ${PATH_COST}</span></div>`,
+      title: 'Paths cost bricks',
+      text: `You start with <b>${START_BRICKS} ${BRICK}</b>. Each new path costs <b>${PATH_COST} ${BRICK}</b> and keeps working every battle until its target falls.`,
+    },
+    {
+      eyebrow: 'HOW IT WORKS • 4',
+      art: `${img('rock')}<span class="arrow">➜</span><div class="cost"><span>+1</span>${BRICK}</div>`,
+      title: 'Mine rocks for bricks',
+      text: `Connect to <b>rocks</b> to mine them: every hit earns <b>+1 ${BRICK}</b>. Hitting enemies pays too. Flag towers pay nothing, but they give you a building.`,
+    },
+  ];
+  if (withGuide) {
+    slides.push({
+      eyebrow: 'BUILDINGS',
+      art: '',
+      title: 'What can you find?',
+      html: `<div class="guide">${Object.keys(INFO).map((k) => `
+        <div class="g">${img(k)}<div class="t"><b>${INFO[k].name}</b><em class="${RARITY[k]}">${GROUP_OF[k].toUpperCase()} • ${RARITY[k].toUpperCase()}</em><br>${INFO[k].line} Zone ${zoneSize(k)}.</div></div>`).join('')}
+        </div><p class="modal-copy"><b>Artillery</b> only fires ammo your unit buildings bring it. Drag from it to aim, even at your own unit building to add floors. Send units to your own unit building for <b>+1 floor = +1 path</b>. Destroyed enemy buildings may turn into yours.</p>`,
+    });
+  }
+  return slides;
+}
 
-function showIntro() {
+function showSlides(slides, doneLabel, done, extra = '', bind = null) {
+  let i = 0;
+  const render = () => {
+    const s = slides[i];
+    const lastSlide = i === slides.length - 1;
+    openModal(`
+      <div class="eyebrow">${s.eyebrow}</div>
+      ${s.art ? `<div class="slide-art">${s.art}</div>` : ''}
+      <h1>${s.title}</h1>
+      ${s.html || `<p class="modal-copy">${s.text}</p>`}
+      <div class="dots">${slides.map((_, k) => `<i class="${k === i ? 'on' : ''}"></i>`).join('')}</div>
+      <button class="btn" id="nextBtn">${lastSlide ? doneLabel : 'NEXT'}</button>
+      ${extra}`);
+    slideNav = (dir) => { const n = i + dir; if (n >= 0 && n < slides.length) { i = n; render(); } };
+    $('nextBtn').onclick = () => { if (!lastSlide) { i++; render(); } else { closeModal(); if (done) done(); } };
+    if (bind) bind();
+  };
+  render();
+}
+
+// ---------------------------------------------------------------- coach tips
+function tipContent(id) {
+  if (id.startsWith('unlock:')) {
+    const k = id.slice(7);
+    return {
+      cls: 'unlock', eyebrow: `NEW ${GROUP_OF[k].toUpperCase()} • ${RARITY[k].toUpperCase()}`, art: img(k),
+      title: `${INFO[k].name} unlocked!`,
+      text: `${INFO[k].line}${isArtillery({ kind: k }) ? ' Drag from it to aim.' : ''} Its zone is <b>${zoneSize(k)}</b>.`,
+    };
+  }
+  return {
+    afterFirstPath: {
+      eyebrow: 'PATH BUILT', art: `<div class="cost">−${PATH_COST}${BRICK}</div>`, title: 'Nice path!',
+      text: `It cost <b>${PATH_COST} ${BRICK}</b>. It stays and sends units <b>every battle</b> until the target falls. <b>Tap a path</b> to remove it. When you're set, tap <b>READY</b>.`,
+    },
+    firstBattle: {
+      eyebrow: 'BATTLE', art: img('squad'), title: 'Units march!',
+      text: `Hits on rocks and enemies earn <b>+1 ${BRICK}</b>. When a flag tower breaks, its building is yours.`,
+    },
+    territoryGrew: {
+      eyebrow: 'TERRITORY', art: zoneArt(), title: 'Your land grew!',
+      text: `The blue dotted line moved out. New flag towers and rocks are in reach now, but only from a building whose square covers them.`,
+    },
+    broke: {
+      eyebrow: 'LOW ON BRICKS', art: `<div class="cost">${BRICK}<span>0</span></div>`, title: 'Out of bricks',
+      text: `New paths cost <b>${PATH_COST} ${BRICK}</b>. Your existing paths keep fighting, and every hit pays <b>+1 ${BRICK}</b>. Mine rocks to refill.`,
+    },
+    supply: {
+      eyebrow: 'SUPPLY DROP', art: `<div class="cost"><span>+</span>${BRICK}</div>`, title: 'Emergency bricks',
+      text: `You had no paths and not enough bricks, so you got topped up to <b>${PATH_COST} ${BRICK}</b>. Spend them on a <b>rock</b> to get your income going again.`,
+    },
+    rockReveal: {
+      eyebrow: 'SURPRISE', art: `${img('rock')}<span class="arrow">➜</span>${img('flag')}`, title: 'A flag tower appeared!',
+      text: `Broken rocks sometimes hide a locked building. Capture it before the CPU does!`,
+    },
+    enemyCapture: {
+      eyebrow: 'CONQUEST', art: img('tank'), title: 'Enemy ground taken!',
+      text: `Destroyed enemy buildings can turn into <b>yours</b>. Push into their land!`,
+    },
+  }[id];
+}
+
+// Tips wait a beat so the effect that triggered them (brick FX, unlock pop) plays first.
+function queueTip(id, delay = 1500) {
+  if (!S || seen(id) || S.tipQueue.includes(id)) return;
+  S.tipQueue.push(id);
+  S.tipAt = Math.max(S.tipAt || 0, performance.now() + delay);
+}
+function pumpTips() {
+  if (!S.tipQueue.length || modal.classList.contains('open') || drag || S.phase === 'over') return;
+  if (performance.now() < (S.tipAt || 0)) return;
+  const id = S.tipQueue.shift();
+  if (seen(id)) return;
+  markSeen(id);
+  const t = tipContent(id);
+  if (!t) return;
   openModal(`
-    <div class="eyebrow">BUILD · CONNECT · BATTLE</div>
-    <h1>City Breaker</h1>
-    ${RULES}
-    <button class="btn" id="playBtn">LET'S PLAY</button>`);
-  $('playBtn').onclick = () => { closeModal(); };
+    <div class="eyebrow">${t.eyebrow}</div>
+    <div class="slide-art">${t.art}</div>
+    <h1>${t.title}</h1>
+    <p class="modal-copy">${t.text}</p>
+    <button class="btn" id="gotBtn">GOT IT</button>`, 'tip ' + (t.cls || ''));
+  $('gotBtn').onclick = closeModal;
+}
+
+// ---------------------------------------------------------------- menus
+function showIntro() {
+  showSlides(introSlides(false), "LET'S PLAY");
 }
 function showHelp() {
-  openModal(`
-    <div class="eyebrow">HOW TO PLAY</div>
-    <h1>City Breaker</h1>
-    ${RULES}
-    <button class="btn" id="resumeBtn">RESUME</button>
-    <button class="link" id="newMatchLink">NEW MATCH</button>`);
-  $('resumeBtn').onclick = closeModal;
-  $('newMatchLink').onclick = confirmRestart;
+  showSlides(introSlides(true), 'RESUME', null,
+    '<button class="link" id="resetTips">SHOW TIPS AGAIN</button><button class="link" id="newMatchLink">NEW MATCH</button>',
+    () => {
+      $('resetTips').onclick = () => { resetTips(); toast('Tips will show again'); };
+      $('newMatchLink').onclick = confirmRestart;
+    });
 }
 function showResult(win, b, r) {
   openModal(`
@@ -1873,7 +2078,7 @@ function showResult(win, b, r) {
       <h1>${win ? 'Victory!' : 'Defeat'}</h1>
       <div class="stats">
         <div class="info"><div class="big">${b}</div><div class="small">your buildings</div></div>
-        <div class="info"><div class="big">${r}</div><div class="small">enemy buildings</div></div>
+        <div class="info"><div class="big">${S.stats.unlocked}</div><div class="small">unlocked</div></div>
         <div class="info"><div class="big">${S.stats.bricks}</div><div class="small">bricks earned</div></div>
       </div>
       <button class="btn" id="againBtn">PLAY AGAIN</button>
@@ -1910,19 +2115,22 @@ $('restartBtn').addEventListener('click', confirmRestart);
 async function boot() {
   try { await document.fonts.ready; } catch (_) { /* fonts optional */ }
   icons = renderIcons();
+  showIntro();   // open first so the opening ARRANGE banner waits until it closes
   startMatch();
+  S.paused = true;
   fitCamera();
-  showIntro();
   requestAnimationFrame(frame);
   // debug hook for testing in the console
   window.CB = {
-    get state() { return S; }, endPhase, connect, place, addEntity,
+    get state() { return S; }, endPhase, connect, addEntity, destroy, rollKind, spawnFlag, unlock, resetTips,
+    setBricks(n, team = 'blue') { S.bricks[team] = n; updateHud(); },
     clearBoard() {
       for (const e of [...S.ents]) removeEntity(e);
       S.terrain = Array.from({ length: ROWS }, () => Array(COLS).fill('ground'));
       S.paths = [];
       rebuildPaths();
       buildTerrainMeshes();
+      rebuildTerritory();
     },
     setTerrain(c, r, t) { S.terrain[r][c] = t; buildTerrainMeshes(); },
     tick: (dt = 1 / 30) => { update(dt, performance.now() / 1000); renderer.render(scene, camera); } };

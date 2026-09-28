@@ -187,6 +187,29 @@ export function makeRock() {
   return root;
 }
 
+// Locked building: a grey stone tower flying a grey flag. What it hides is
+// only revealed when somebody breaks it.
+export function makeFlagTower() {
+  const root = new THREE.Group();
+  const stone = mat(0x9398a1), dark = mat(0x70757e), slit = mat(0x3d4048);
+  root.add(mesh(rbox(0.7, 0.14, 0.7, 0.05), dark, 0, 0.07, 0));
+  root.add(mesh(rbox(0.5, 0.62, 0.5, 0.06), stone, 0, 0.45, 0));
+  root.add(mesh(box(0.14, 0.2, 0.03), slit, 0, 0.26, 0.252));
+  root.add(mesh(box(0.07, 0.12, 0.03), slit, 0, 0.56, 0.252));
+  root.add(mesh(rbox(0.64, 0.1, 0.64, 0.03), mat(0xa9aeb6), 0, 0.8, 0));
+  for (const [x, z] of [[-0.24, -0.24], [0.24, -0.24], [-0.24, 0.24], [0.24, 0.24]]) {
+    root.add(mesh(rbox(0.14, 0.13, 0.14, 0.03), stone, x, 0.91, z));
+  }
+  root.add(mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.62, 6), mat(0xdcdcdc), 0, 1.16, 0));
+  const flag = new THREE.Group();
+  flag.position.set(0, 1.36, 0);
+  flag.add(mesh(box(0.3, 0.18, 0.02), mat(0xc4c8ce), 0.16, 0, 0));
+  root.add(flag);
+  root.userData.flag = flag;
+  root.userData.getHeight = () => 1.5;
+  return root;
+}
+
 const domeMat = new THREE.MeshStandardMaterial({
   color: 0x8fdcff, emissive: 0x3aa7ff, emissiveIntensity: 0.35, transparent: true, opacity: 0.3,
   depthWrite: false, roughness: 0.2, side: THREE.DoubleSide,
@@ -341,6 +364,7 @@ export function makeModel(kind, team) {
     case 'arrow': return makeArrow(team);
     case 'quarry': return makeQuarry(team);
     case 'rock': return makeRock();
+    case 'flag': return makeFlagTower();
     case 'shield': return makeShield();
   }
   throw new Error('Unknown model ' + kind);
