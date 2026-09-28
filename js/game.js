@@ -15,7 +15,8 @@ const TILE = 0.9;             // tile size; the rest of each cell is the gap bet
 // building's reach (paths, tower shots) and the land it claims.
 const ZONE = { squad: 1, tank: 2, heli: 2, cannon: 2, arrow: 2, quarry: 1 };
 const PATH_COST = 5;           // bricks per new connection
-const START_BRICKS = 15;
+const START_BRICKS = 10;
+const BATTLE_INCOME = 2;       // both teams get this at the end of every battle
 const UNITS_PER_PATH = 5;
 const PHASE_TIME = 30;
 const MAX_ROUNDS = 15;
@@ -776,7 +777,7 @@ function generateMap() {
       let kind = null, hp = 0, hidden = null;
       if (roll < 0.38) {
         kind = 'rock';
-        hp = 5 * ([1, 1, 2][band] + (band && Math.random() < 0.5 ? 1 : 0));
+        hp = 5 * ([2, 2, 3][band] + (band && Math.random() < 0.5 ? 1 : 0));   // 10 near home, up to 20 mid-board
       } else if (roll < 0.72) {
         kind = 'flag';
         hp = [5, 10, 15][band];
@@ -1388,25 +1389,9 @@ function startMatch() {
   startConnect();
 }
 
-// Nobody gets soft-locked: a team with no paths and too few bricks for one
-// gets topped up so it can always draw at least one path.
-function supplyDrop() {
-  for (const team of ['blue', 'red']) {
-    if (S.bricks[team] >= PATH_COST || S.paths.some((p) => p.team === team) || !buildings(team).some(canSource)) continue;
-    const n = PATH_COST - S.bricks[team];
-    S.bricks[team] = PATH_COST;
-    if (team === 'blue') {
-      const home = buildings('blue').find(canSource);
-      setTimeout(() => floatText(home.x, entHeight(home) + 0.5, home.z, `SUPPLY +${n}${BRICK}`, 'heal', 1600), 700);
-      queueTip('supply');
-    }
-  }
-}
-
 function startConnect() {
   S.phase = 'connect';
   S.timer = PHASE_TIME;
-  if (S.round > 1) supplyDrop();
   if (S.round > 1 && S.bricks.blue < PATH_COST) queueTip('broke');
   showBanner('ARRANGE', S.round === 1 ? 'Connect your buildings' : `Round ${S.round} • draw paths, then READY`);
   updateHud();
@@ -1448,6 +1433,12 @@ function endBattle() {
     setTimeout(() => showResult(win, b, r), 600);
     return;
   }
+  // battle income for both sides
+  for (const team of ['blue', 'red']) S.bricks[team] += BATTLE_INCOME;
+  const home = buildings('blue')[0];
+  if (home) floatText(home.x, entHeight(home) + 0.5, home.z, `INCOME +${BATTLE_INCOME}${BRICK}`, 'heal', 1600);
+  const pill = document.querySelector('.brick-pill');
+  pill.classList.remove('bump'); void pill.offsetWidth; pill.classList.add('bump');
   S.round++;
   startConnect();
 }
@@ -1952,7 +1943,7 @@ function introSlides(withGuide) {
       eyebrow: 'HOW IT WORKS • 3',
       art: `<div class="cost">${BRICK}<span>× ${PATH_COST}</span></div>`,
       title: 'Paths cost bricks',
-      text: `You start with <b>${START_BRICKS} ${BRICK}</b>. Each new path costs <b>${PATH_COST} ${BRICK}</b> and keeps working every battle until its target falls.`,
+      text: `You start with <b>${START_BRICKS} ${BRICK}</b>. Each new path costs <b>${PATH_COST} ${BRICK}</b> and keeps working every battle until its target falls. After every battle you get <b>+${BATTLE_INCOME} ${BRICK}</b>.`,
     },
     {
       eyebrow: 'HOW IT WORKS • 4',
@@ -2019,11 +2010,7 @@ function tipContent(id) {
     },
     broke: {
       eyebrow: 'LOW ON BRICKS', art: `<div class="cost">${BRICK}<span>0</span></div>`, title: 'Out of bricks',
-      text: `New paths cost <b>${PATH_COST} ${BRICK}</b>. Your existing paths keep fighting, and every hit pays <b>+1 ${BRICK}</b>. Mine rocks to refill.`,
-    },
-    supply: {
-      eyebrow: 'SUPPLY DROP', art: `<div class="cost"><span>+</span>${BRICK}</div>`, title: 'Emergency bricks',
-      text: `You had no paths and not enough bricks, so you got topped up to <b>${PATH_COST} ${BRICK}</b>. Spend them on a <b>rock</b> to get your income going again.`,
+      text: `New paths cost <b>${PATH_COST} ${BRICK}</b>. You get <b>+${BATTLE_INCOME} ${BRICK}</b> after every battle, and every hit on rocks and enemies pays <b>+1 ${BRICK}</b>. Mine rocks to refill.`,
     },
     rockReveal: {
       eyebrow: 'SURPRISE', art: `${img('rock')}<span class="arrow">➜</span>${img('flag')}`, title: 'A flag tower appeared!',
