@@ -38,7 +38,11 @@
 
     <div id="hudRow2">
       <div class="team-chip blue">YOU <b id="blueCount">1</b></div>
-      <button id="helpBtn" aria-label="How to play">?</button>
+      <div class="hud-btns">
+        <button id="pauseBtn" class="round-btn" aria-label="Pause"><svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.5" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1.5" fill="currentColor"/></svg></button>
+        <button id="restartBtn" class="round-btn" aria-label="Restart"><svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M19.5 3.5v5h-5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button id="helpBtn" class="round-btn" aria-label="How to play">?</button>
+      </div>
       <div class="team-chip red">CPU <b id="redCount">1</b></div>
     </div>
 

@@ -58,15 +58,51 @@ function floorMesh(team, i) {
   return g;
 }
 
-export function makeNormal(team) {
+// Sender buildings: a floor stack (1 floor = 5 hp) plus a roof accessory
+// that tells the three types apart.
+export function makeSender(team, type = 'squad') {
   const root = new THREE.Group();
   const floors = new THREE.Group();
   root.add(floors);
+  const roof = new THREE.Group();
+  root.add(roof);
+  if (type === 'squad') {
+    roof.add(mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.34, 6), mat(0xdcdcdc), 0.24, 0.17, -0.2));
+    const flag = mesh(box(0.2, 0.12, 0.02), mat(TEAM[team].top), 0.34, 0.28, -0.2);
+    roof.add(flag);
+  } else if (type === 'tank') {
+    const t = makeTank(team);
+    t.scale.setScalar(1.25);
+    t.rotation.y = 0.5;
+    roof.add(t);
+  } else if (type === 'heli') {
+    roof.add(mesh(new THREE.CylinderGeometry(0.33, 0.33, 0.03, 24), mat(0x3c4048), 0, 0.015, 0));
+    roof.add(mesh(box(0.05, 0.012, 0.26), mat(0xffffff), -0.08, 0.035, 0));
+    roof.add(mesh(box(0.05, 0.012, 0.26), mat(0xffffff), 0.08, 0.035, 0));
+    roof.add(mesh(box(0.14, 0.012, 0.05), mat(0xffffff), 0, 0.035, 0));
+    const h = makeHeli(team);
+    h.scale.setScalar(1.1);
+    h.position.y = 0.04;
+    h.rotation.y = 0.6;
+    roof.add(h);
+    roof.userData.rotor = h.userData.rotor;
+  }
+  root.userData.roof = roof;
   root.userData.setFloors = (n) => {
     while (floors.children.length > n) floors.remove(floors.children[floors.children.length - 1]);
-    while (floors.children.length < n) floors.add(floorMesh(team, floors.children.length));
+    while (floors.children.length < n) {
+      const i = floors.children.length;
+      const f = floorMesh(team, i);
+      if (type === 'tank' && i === 0) {
+        // garage door on the ground floor
+        f.add(mesh(box(0.42, 0.24, 0.03), mat(0x2a2e36), 0, 0.14, 0.412));
+        for (const y of [0.07, 0.13, 0.19]) f.add(mesh(box(0.4, 0.012, 0.035), mat(0x4a505b), 0, y, 0.414));
+      }
+      floors.add(f);
+    }
+    roof.position.y = floors.children.length * FLOOR_H;
   };
-  root.userData.getHeight = () => floors.children.length * FLOOR_H;
+  root.userData.getHeight = () => floors.children.length * FLOOR_H + (type === 'squad' ? 0.1 : 0.25);
   root.userData.setFloors(2);
   return root;
 }
@@ -178,20 +214,129 @@ export function makeShield() {
   return root;
 }
 
-const unitGeo = new THREE.SphereGeometry(0.095, 14, 10);
-const headGeo = new THREE.SphereGeometry(0.062, 12, 8);
-export function makeUnit(team) {
+// ---------------------------------------------------------------- units
+const legGeo = new THREE.BoxGeometry(0.045, 0.09, 0.05);
+export function makeSoldier(team) {
   const root = new THREE.Group();
-  const body = mesh(unitGeo, mat(TEAM[team].body), 0, 0.1, 0);
-  body.scale.set(1, 1.1, 1);
+  const c = TEAM[team];
+  const legs = [mesh(legGeo, mat(0x2b2f38), -0.035, 0.045, 0), mesh(legGeo, mat(0x2b2f38), 0.035, 0.045, 0)];
+  legs.forEach((l) => root.add(l));
+  root.add(mesh(rbox(0.13, 0.12, 0.09, 0.03), mat(c.body), 0, 0.15, 0));
+  root.add(mesh(new THREE.SphereGeometry(0.05, 10, 8), mat(0xf2c9a0), 0, 0.25, 0));
+  const helmet = mesh(new THREE.SphereGeometry(0.058, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), mat(c.dark), 0, 0.26, 0);
+  root.add(helmet);
+  root.add(mesh(box(0.025, 0.025, 0.14), mat(0x3a3d44), 0.075, 0.16, 0.03));
+  root.userData.legs = legs;
+  return root;
+}
+
+export function makeTank(team) {
+  const root = new THREE.Group();
+  const c = TEAM[team];
+  const track = mat(0x2d3038);
+  root.add(mesh(rbox(0.1, 0.1, 0.36, 0.04), track, -0.11, 0.05, 0));
+  root.add(mesh(rbox(0.1, 0.1, 0.36, 0.04), track, 0.11, 0.05, 0));
+  root.add(mesh(rbox(0.24, 0.09, 0.32, 0.03), mat(c.body), 0, 0.11, 0));
+  const turret = new THREE.Group();
+  turret.position.y = 0.16;
+  turret.add(mesh(rbox(0.16, 0.08, 0.16, 0.03), mat(c.top), 0, 0.03, 0));
+  const barrel = mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.22, 8), mat(0x5b6068), 0.13, 0.04, 0);
+  barrel.rotation.z = Math.PI / 2;
+  turret.add(barrel);
+  root.add(turret);
+  root.userData.turret = turret;
+  return root;
+}
+
+export function makeHeli(team) {
+  const root = new THREE.Group();
+  const c = TEAM[team];
+  const body = mesh(new THREE.SphereGeometry(0.11, 14, 10), mat(c.body), 0, 0.12, 0);
+  body.scale.set(1.35, 0.9, 1);
   root.add(body);
-  root.add(mesh(headGeo, mat(TEAM[team].light), 0, 0.23, 0));
+  root.add(mesh(new THREE.SphereGeometry(0.06, 10, 8), mat(0xbfe6ff, { roughness: 0.2 }), 0.09, 0.14, 0));
+  root.add(mesh(box(0.24, 0.035, 0.035), mat(c.body), -0.2, 0.14, 0));
+  root.add(mesh(box(0.02, 0.09, 0.06), mat(c.dark), -0.31, 0.17, 0));
+  for (const z of [-0.07, 0.07]) root.add(mesh(box(0.24, 0.015, 0.015), mat(0x2d3038), 0, 0.01, z));
+  root.add(mesh(box(0.02, 0.06, 0.02), mat(0x2d3038), 0, 0.22, 0));
+  const rotor = new THREE.Group();
+  rotor.position.y = 0.25;
+  rotor.add(mesh(box(0.5, 0.01, 0.04), mat(0x2d3038)));
+  rotor.add(mesh(box(0.04, 0.01, 0.5), mat(0x2d3038)));
+  root.add(rotor);
+  root.userData.rotor = rotor;
+  return root;
+}
+
+const shadowTex = (() => {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 64;
+  const g = cv.getContext('2d');
+  const grd = g.createRadialGradient(32, 32, 4, 32, 32, 30);
+  grd.addColorStop(0, 'rgba(0,0,0,.35)');
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(cv);
+})();
+export function makeBlobShadow(size = 0.4) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2;
+  m.position.y = 0.02;
+  return m;
+}
+
+// ---------------------------------------------------------------- terrain
+const waterTex = (() => {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 64;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#39a9e6';
+  g.fillRect(0, 0, 64, 64);
+  g.strokeStyle = 'rgba(255,255,255,.35)';
+  g.lineWidth = 3;
+  g.lineCap = 'round';
+  for (const [x, y] of [[10, 16], [38, 30], [16, 48], [46, 56]]) {
+    g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + 6, y - 4, x + 12, y); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+})();
+export { waterTex };
+export function makeWaterTile() {
+  const root = new THREE.Group();
+  const bed = new THREE.Mesh(box(1, 0.02, 1), mat(0xd9803a));
+  bed.position.y = -0.004;
+  root.add(bed);
+  const water = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ map: waterTex, roughness: 0.25, transparent: true, opacity: 0.95 }));
+  water.rotation.x = -Math.PI / 2;
+  water.position.y = 0.012;
+  water.receiveShadow = true;
+  root.add(water);
+  return root;
+}
+
+export function makeMountain(seed = 0) {
+  const root = new THREE.Group();
+  root.add(mesh(rbox(1, 0.5, 1, 0.1), mat(0xb86f36), 0, 0.25, 0));
+  const rock = mat(0x94603f, { flatShading: true, roughness: 0.95 });
+  const peak = mesh(new THREE.ConeGeometry(0.42, 0.62, 6), rock, -0.06, 0.8, -0.05);
+  peak.rotation.y = seed;
+  root.add(peak);
+  const p2 = mesh(new THREE.ConeGeometry(0.26, 0.38, 5), rock, 0.24, 0.68, 0.18);
+  p2.rotation.y = seed * 2;
+  root.add(p2);
+  root.add(mesh(new THREE.ConeGeometry(0.15, 0.14, 6), mat(0xf4efe6, { flatShading: true }), -0.06, 1.05, -0.05));
   return root;
 }
 
 export function makeModel(kind, team) {
   switch (kind) {
-    case 'normal': return makeNormal(team);
+    case 'squad':
+    case 'tank':
+    case 'heli': return makeSender(team, kind);
     case 'cannon': return makeCannon(team);
     case 'arrow': return makeArrow(team);
     case 'quarry': return makeQuarry(team);

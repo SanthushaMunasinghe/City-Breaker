@@ -139,19 +139,24 @@ i.brick {
 .team-chip b { font-size: 15px; margin-left: 3px; font-weight: normal; }
 .team-chip.blue { background: #1f6dff; }
 .team-chip.red { background: #e4222e; }
-#helpBtn {
-  pointer-events: auto;
-  width: 28px;
-  height: 28px;
+.hud-btns { display: flex; gap: 8px; pointer-events: auto; }
+.round-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: grid;
+  place-items: center;
   border-radius: 50%;
   border: 2px solid #2f5a9f;
-  background: #14284f;
+  background: linear-gradient(#1d3766, #122750);
   color: #fff;
   font-family: 'Lilita One', sans-serif;
-  font-size: 16px;
+  font-size: 17px;
   cursor: pointer;
-  box-shadow: 0 2px 0 #091631;
+  box-shadow: 0 3px 0 #091631;
 }
+.round-btn svg { width: 16px; height: 16px; }
+.round-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #091631; }
 
 /* ---------- world labels ---------- */
 .lbl {
@@ -184,6 +189,21 @@ i.brick {
 .lbl b { background: #29b6f6; }
 .lbl b::before { content: '⛨'; margin-right: 2px; }
 .lbl i { font-style: normal; font-size: 11px; background: #3b3f46; border: 2px solid #fff; border-radius: 8px; padding: 1px 5px 0; }
+
+.ulbl {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 5px;
+  background: rgba(10, 20, 40, .7);
+  will-change: transform;
+}
+.ulbl i { width: 5px; height: 5px; border-radius: 1px; background: rgba(255, 255, 255, .25); }
+.ulbl-blue i.on { background: #5aa2ff; }
+.ulbl-red i.on { background: #ff5a64; }
 
 .float {
   position: absolute;
@@ -249,7 +269,7 @@ i.brick {
 .toast {
   position: absolute;
   left: 50%;
-  bottom: calc(min(31%, 300px) + 14px);
+  bottom: calc(min(23.5%, 232px) + 12px);
   transform: translate(-50%, 10px);
   background: rgba(14, 30, 62, .92);
   border: 2px solid #3a74c9;
@@ -271,20 +291,20 @@ i.brick {
   left: 0;
   right: 0;
   bottom: 0;
-  height: clamp(236px, 31%, 300px);
+  height: clamp(180px, 23.5%, 232px);
   background: linear-gradient(#17315f, #0e1f43);
   border-top: 3px solid #2b5597;
   border-radius: 22px 22px 0 0;
   box-shadow: 0 -6px 18px rgba(0, 0, 0, .25);
-  padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+  padding: 9px 10px calc(9px + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 7px;
 }
 #panelTitle {
   text-align: center;
   font-family: 'Lilita One', sans-serif;
-  font-size: clamp(15px, 4.8vw, 22px);
+  font-size: clamp(14px, 4.3vw, 19px);
   letter-spacing: .4px;
   line-height: 1;
 }
@@ -323,8 +343,8 @@ i.brick {
   align-items: center;
   gap: 5px;
   font-family: 'Lilita One', sans-serif;
-  font-size: clamp(15px, 4.6vw, 21px);
-  line-height: 1.25;
+  font-size: clamp(13px, 4vw, 18px);
+  line-height: 1.2;
 }
 .card.sel {
   border-color: #d6f6ff;
@@ -361,10 +381,10 @@ i.brick {
   padding: 6px 4px;
   text-align: center;
 }
-.info .big { font-family: 'Lilita One', sans-serif; font-size: clamp(20px, 6.5vw, 30px); line-height: 1; display: flex; align-items: center; gap: 4px; }
+.info .big { font-family: 'Lilita One', sans-serif; font-size: clamp(18px, 5.6vw, 26px); line-height: 1; display: flex; align-items: center; gap: 4px; }
 .info .small { font-size: 12px; font-weight: 600; opacity: .85; line-height: 1.15; }
 .info.wide { flex: 2.4; align-items: flex-start; text-align: left; padding: 8px 12px; gap: 6px; }
-.info.wide p { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.25; opacity: .92; }
+.info.wide p { margin: 0; font-size: 12px; font-weight: 600; line-height: 1.25; opacity: .92; }
 .info.wide p b { color: #8fd1ff; font-weight: 700; }
 .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 4px; vertical-align: -2px; margin-right: 3px; border: 2px solid #fff; }
 
@@ -372,13 +392,13 @@ i.brick {
   flex: none;
   align-self: center;
   width: 72%;
-  height: clamp(48px, 7vh, 60px);
+  height: clamp(40px, 5.6vh, 50px);
   border-radius: 18px;
   border: 3px solid #1450c4;
   background: linear-gradient(#45a0ff, #1b64ec);
   box-shadow: inset 0 3px 0 rgba(255, 255, 255, .35), 0 5px 0 #0c3a98, 0 8px 12px rgba(0, 0, 0, .25);
   font-family: 'Lilita One', sans-serif;
-  font-size: clamp(22px, 7vw, 32px);
+  font-size: clamp(20px, 6vw, 27px);
   letter-spacing: .5px;
   color: #fff;
   text-shadow: 0 2px 0 #0c3a98;
@@ -422,6 +442,7 @@ i.brick {
 .modal-box ul { margin: 12px 0 16px; padding-left: 18px; }
 .modal-box li { font-size: 14px; font-weight: 500; line-height: 1.35; margin-bottom: 7px; }
 .modal-box li b { color: #9fd6ff; }
+.modal-box .modal-copy { font-size: 15px; font-weight: 500; opacity: .9; margin: 6px 0 18px; }
 .modal-box .stats { display: flex; gap: 8px; margin: 16px 0; }
 .modal-box .stats .info { padding: 10px 4px; }
 .modal-box .btn {
