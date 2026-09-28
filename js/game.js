@@ -71,6 +71,9 @@ const zoneOf = (e) => ZONE[e.kind] ?? 0;
 const zoneSize = (kind) => `${ZONE[kind] * 2 + 1}×${ZONE[kind] * 2 + 1}`;
 const cheb = (a, c, r) => Math.max(Math.abs(a.c - c), Math.abs(a.r - r));
 const inZone = (src, t) => cheb(src, t.c, t.r) <= zoneOf(src);
+// Connect reach: unit buildings reach anything inside their team's land;
+// artillery aims (and every shot flies) only inside its own zone.
+const inReach = (src, c, r) => (isArtillery(src) ? cheb(src, c, r) <= zoneOf(src) : zoneCells(src.team)[r][c]);
 
 function pickWeighted(weights) {
   const entries = Object.entries(weights);
@@ -330,6 +333,17 @@ function showZone(e, color = 0xffffff) {
   zoneGroup.add(fill);
   for (const [a, b, c, d] of [[x0, z0, x1, z0], [x1, z0, x1, z1], [x1, z1, x0, z1], [x0, z1, x0, z0]]) {
     zoneGroup.add(ribbon(a, b, c, d, 0.09, zoneLineMat, 0.03, 0.2));
+  }
+}
+function showLand(team) {
+  hideZone();
+  const inside = zoneCells(team);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (!inside[r][c]) continue;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(TILE, TILE), zoneFillMat);
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(cx(c), 0.018, cz(r));
+    zoneGroup.add(m);
   }
 }
 function hideZone() { disposeGroup(zoneGroup); }
@@ -599,7 +613,7 @@ function checkConnect(team, from, to) {
   if (!from || !to || from === to) return { ok: false, silent: true };
   if (from.team !== team || !canSource(from)) return { ok: false, reason: 'Quarries don\'t send anything' };
   if (findPath(from, to)) return { ok: false, silent: true, reason: 'Already connected' };
-  if (!inZone(from, to)) return { ok: false, reason: 'Outside its zone' };
+  if (!inReach(from, to.c, to.r)) return { ok: false, reason: isArtillery(from) ? 'Outside its zone' : 'Outside your land' };
   if (isArtillery(from)) {
     if (to.team === team && !isSender(to)) return { ok: false, reason: 'Artillery only boosts unit buildings' };
     if (outLinks(from) >= 1) return { ok: false, reason: 'One aim per artillery: tap its path to remove' };
@@ -767,6 +781,7 @@ function generateMap() {
     S.ents = [];
     S.terrain = generateTerrain(home);
     const blue = addEntity('squad', 'blue', ...home.blue, START_HP);
+    S.home = blue;
     const red = addEntity('squad', 'red', ...home.red, START_HP);
     // mirrored pairs (same hp, same hidden building) keep the map fair
     for (let r = 0; r < HALF_ROWS; r++) for (let c = 0; c < COLS; c++) {
@@ -1348,7 +1363,7 @@ function cpuConnect() {
     const heavy = src.kind !== 'squad';
     for (const t of S.ents) {
       if (t === src || findPath(src, t)) continue;
-      if (!inZone(src, t) || !losClear(src, t, losMode(src))) continue;
+      if (!inReach(src, t.c, t.r) || !losClear(src, t, losMode(src))) continue;
       let score;
       if (t.kind === 'flag') {
         score = 16 + Math.max(0, 15 - t.hp) * 0.3 + (S.paths.some((p) => p.team === 'blue' && p.to === t) ? 3 : 0);
@@ -1603,7 +1618,8 @@ canvas.addEventListener('pointerdown', (ev) => {
   const e = hit || (onPath ? null : pickEntity(ev));
   if (S.phase === 'connect' && e && e.team === 'blue' && canSource(e)) {
     drag = { type: 'connect', src: e, id: ev.pointerId };
-    showZone(e);
+    zoneFillMat.color.set(0xffffff);
+    if (isArtillery(e)) showZone(e); else showLand('blue');
     showTargets(e);
     e.bump = 0.5;
     return;
@@ -1647,9 +1663,9 @@ function moveConnect(ev) {
   } else {
     drag.tgt = null;
     const cell = cellAt(gp);
-    const far = !cell || cheb(src, cell.c, cell.r) > zoneOf(src);
+    const far = !cell || !inReach(src, cell.c, cell.r);
     setDragLine(src.x, src.z, gp.x, gp.z, far ? 0xff5a5a : 0xffffff, losMode(src));
-    showBubble(far ? 'Outside its zone' : 'Drag to a target', p.x, p.y - 34, far ? 'bad' : '');
+    showBubble(far ? (isArtillery(src) ? 'Outside its zone' : 'Outside your land') : 'Drag to a target', p.x, p.y - 34, far ? 'bad' : '');
   }
 }
 
@@ -1789,13 +1805,12 @@ function animateEntities(dt, time) {
   }
 }
 
-// Coach hand: until the first path is drawn, show the drag from home to a flag tower.
-function hintPair() {
-  for (const src of buildings('blue').filter(isSender)) {
-    if (outLinks(src) >= linkSlots(src)) continue;
-    const ok = (t) => !findPath(src, t) && inZone(src, t) && losClear(src, t, losMode(src));
-    const t = S.ents.filter((t) => t.kind === 'flag' && ok(t)).sort((a, b) => a.hp - b.hp)[0]
-      || S.ents.filter((t) => t.kind === 'rock' && ok(t)).sort((a, b) => a.hp - b.hp)[0];
+// Coach hand pair: a sender (the starting building first) and the nearest
+// connectable target of the given kind.
+function hintPair(kind) {
+  const srcs = buildings('blue').filter(isSender).sort((a, b) => (b === S.home) - (a === S.home));
+  for (const src of srcs) {
+    const t = S.ents.filter((t) => t.kind === kind && checkConnect('blue', src, t).ok).sort((a, b) => dist(src, a) - dist(src, b))[0];
     if (t) return { src, t };
   }
   return null;
@@ -1816,7 +1831,10 @@ function updateHand(time) {
     showBubble('Tap READY to start the battle', x, y + 62, 'below');
     return;
   }
-  const pair = first && !hasPath && S.bricks.blue >= PATH_COST && hintPair();
+  // turn 1: capture a flag tower; turn 2: mine a rock until you have a rock path
+  const mining = S.round === 2 && S.phase === 'connect' && !drag && !S.paused
+    && !S.paths.some((p) => p.team === 'blue' && p.to.kind === 'rock');
+  const pair = (first && !hasPath && (hintPair('flag') || hintPair('rock'))) || (mining && hintPair('rock'));
   if (!pair) {
     hand.classList.add('hidden');
     if (hintOn && !drag) hideBubble();
@@ -1833,7 +1851,7 @@ function updateHand(time) {
   hand.style.opacity = k > 0.88 ? (1 - (k - 0.88) / 0.12) : 1;
   hand.style.transform = `translate(${a.x + (b.x - a.x) * ease - 14}px, ${a.y + (b.y - a.y) * ease - 4}px)`;
   const bp = toScreen(t.x, entHeight(t) + 0.45, t.z);
-  showBubble(t.kind === 'flag' ? 'Drag here to capture it!' : 'Drag to a rock to mine it', bp.x, bp.y - 6);
+  showBubble(t.kind === 'flag' ? 'Drag here to capture it!' : 'Mine this rock for bricks!', bp.x, bp.y - 6);
 }
 
 let last = performance.now();
@@ -1931,7 +1949,7 @@ function introSlides(withGuide) {
       eyebrow: 'HOW IT WORKS • 1',
       art: zoneArt(),
       title: 'This is your land',
-      text: `Every building claims the squares around it. The <b>blue dotted line</b> marks your land. A building can only reach what's inside its own square.`,
+      text: `Every building claims the squares around it. The <b>blue dotted line</b> marks your land. Your unit buildings can connect to anything inside it.`,
     },
     {
       eyebrow: 'HOW IT WORKS • 2',
@@ -1958,7 +1976,7 @@ function introSlides(withGuide) {
       art: '',
       title: 'What can you find?',
       html: `<div class="guide">${Object.keys(INFO).map((k) => `
-        <div class="g">${img(k)}<div class="t"><b>${INFO[k].name}</b><em class="${RARITY[k]}">${GROUP_OF[k].toUpperCase()} • ${RARITY[k].toUpperCase()}</em><br>${INFO[k].line} Zone ${zoneSize(k)}.</div></div>`).join('')}
+        <div class="g">${img(k)}<div class="t"><b>${INFO[k].name}</b><em class="${RARITY[k]}">${GROUP_OF[k].toUpperCase()} • ${RARITY[k].toUpperCase()}</em><br>${INFO[k].line} ${isArtillery({ kind: k }) ? 'Claims & shoots' : 'Claims'} ${zoneSize(k)}.</div></div>`).join('')}
         </div><p class="modal-copy"><b>Artillery</b> only fires ammo your unit buildings bring it. Drag from it to aim, even at your own unit building to add floors. Send units to your own unit building for <b>+1 floor = +1 path</b>. Destroyed enemy buildings may turn into yours.</p>`,
     });
   }
@@ -1992,7 +2010,7 @@ function tipContent(id) {
     return {
       cls: 'unlock', eyebrow: `NEW ${GROUP_OF[k].toUpperCase()} • ${RARITY[k].toUpperCase()}`, art: img(k),
       title: `${INFO[k].name} unlocked!`,
-      text: `${INFO[k].line}${isArtillery({ kind: k }) ? ' Drag from it to aim.' : ''} Its zone is <b>${zoneSize(k)}</b>.`,
+      text: `${INFO[k].line}${isArtillery({ kind: k }) ? ' Drag from it to aim.' : ''} It claims <b>${zoneSize(k)}</b> of land${isArtillery({ kind: k }) ? ' and shoots inside it' : ''}.`,
     };
   }
   return {
@@ -2006,7 +2024,7 @@ function tipContent(id) {
     },
     territoryGrew: {
       eyebrow: 'TERRITORY', art: zoneArt(), title: 'Your land grew!',
-      text: `The blue dotted line moved out. New flag towers and rocks are in reach now, but only from a building whose square covers them.`,
+      text: `The blue dotted line moved out. Everything inside the line is now in reach of all your unit buildings.`,
     },
     broke: {
       eyebrow: 'LOW ON BRICKS', art: `<div class="cost">${BRICK}<span>0</span></div>`, title: 'Out of bricks',
