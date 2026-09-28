@@ -384,17 +384,15 @@ function setDragLine(x1, z1, x2, z2, color, mode = 'ground') {
 }
 
 // ---------------------------------------------------------------- tips memory
-const TIP_KEY = 'cb-hex-tips';
+// Per page load, like the intro slides: a refresh replays the guided match and
+// every coach tip.
 let seenTips = {};
-try { seenTips = JSON.parse(localStorage.getItem(TIP_KEY) || '{}') || {}; } catch (_) { seenTips = {}; }
+let handTutorialPending = true;   // the first match after a load is the guided one
 const seen = (id) => !!seenTips[id];
-function markSeen(id) {
-  seenTips[id] = 1;
-  try { localStorage.setItem(TIP_KEY, JSON.stringify(seenTips)); } catch (_) { /* storage optional */ }
-}
+function markSeen(id) { seenTips[id] = 1; }
 function resetTips() {
   seenTips = {};
-  try { localStorage.removeItem(TIP_KEY); } catch (_) { /* storage optional */ }
+  handTutorialPending = true;
 }
 
 // ---------------------------------------------------------------- game state
@@ -419,6 +417,8 @@ function newState() {
     earned: 0,
     stats: { destroyed: 0, lost: 0, bricks: 0, unlocked: 0 },
     tipQueue: [],
+    tutorial: handTutorialPending,   // guided hand steps, first match after a page load
+    tutDone: {},
     battleHold: 0,
     paused: false,
   };
@@ -1396,6 +1396,7 @@ function startMatch() {
   for (const u of S ? S.units : []) killUnit(u, false);
   for (const p of S ? S.projectiles : []) scene.remove(p.mesh);
   cancelDrag();
+  curStep = null;
   S = newState();
   terrKey.blue = terrKey.red = '';
   generateMap();
@@ -1408,6 +1409,7 @@ function startConnect() {
   S.phase = 'connect';
   S.timer = PHASE_TIME;
   if (S.round > 1 && S.bricks.blue < PATH_COST) queueTip('broke');
+  if (S.round > 3) endTutorial();
   showBanner('ARRANGE', S.round === 1 ? 'Connect your buildings' : `Round ${S.round} • draw paths, then READY`);
   updateHud();
 }
@@ -1444,6 +1446,7 @@ function endBattle() {
     else if (b !== r) win = b > r;
     else win = buildings('blue').reduce((s, e) => s + e.hp, 0) >= buildings('red').reduce((s, e) => s + e.hp, 0);
     S.phase = 'over';
+    endTutorial();
     updateHud();
     setTimeout(() => showResult(win, b, r), 600);
     return;
@@ -1461,7 +1464,11 @@ function endBattle() {
 function endPhase() {
   if (S.phase === 'connect') endConnect();
 }
-goBtn.addEventListener('click', () => { if (S && !S.paused) endPhase(); });
+goBtn.addEventListener('click', () => {
+  if (!S || S.paused) return;
+  if (curStep && curStep.kind === 'connect') { toast('Follow the hand first 👆'); return; }
+  endPhase();
+});
 
 // ---------------------------------------------------------------- HUD
 const PHASE_NAME = { connect: 'CONNECT', battle: 'BATTLE', over: 'GAME OVER', intro: 'READY' };
@@ -1475,9 +1482,9 @@ function updateHud() {
   const connecting = S.phase === 'connect';
   const hasPath = S.paths.some((p) => p.team === 'blue');
   // first turn: READY only shows up once you've drawn a path
-  const ready = connecting && (S.round > 1 || hasPath);
+  const ready = connecting && !(S.tutorial && S.round === 1 && !hasPath);
   goBtn.classList.toggle('show', ready);
-  goBtn.classList.toggle('pulse', ready && S.round === 1);
+  goBtn.classList.toggle('pulse', ready && S.tutorial && S.round <= 3);
   modePill.className = 'mode-pill';
   if (S.phase === 'battle') { modePill.textContent = '⚔ BATTLE'; modePill.classList.add('show', 'battle'); }
   else if (connecting && !ready) { modePill.textContent = 'DRAW A PATH'; modePill.classList.add('show', 'hint'); }
@@ -1500,13 +1507,13 @@ function showBanner(title, sub, cls = '') {
 bannerEl.addEventListener('animationend', () => bannerEl.classList.remove('show'));
 function updateTimer() {
   let t;
-  if (S.phase === 'connect') t = S.round === 1 ? 'CONNECT • NO RUSH' : `CONNECT • ${Math.ceil(S.timer)}s`;
+  if (S.phase === 'connect') t = curStep ? 'CONNECT • NO RUSH' : `CONNECT • ${Math.ceil(S.timer)}s`;
   else if (S.phase === 'battle') t = `BATTLE • +${S.earned}`;
   else t = `ROUND ${S.round} / ${MAX_ROUNDS}`;
   if (t !== lastTimerText) {
     $('timerText').innerHTML = S.phase === 'battle' ? `${t} ${BRICK}` : t;
     lastTimerText = t;
-    document.querySelector('.timer-pill').classList.toggle('hurry', S.phase === 'connect' && S.round > 1 && S.timer <= 5);
+    document.querySelector('.timer-pill').classList.toggle('hurry', S.phase === 'connect' && !curStep && S.timer <= 5);
   }
 }
 
@@ -1602,7 +1609,7 @@ function showTargets(src) {
   hideMarkers();
   let i = 0;
   for (const t of S.ents) {
-    if (t === src) continue;
+    if (t === src || (curStep && curStep.t && t !== curStep.t)) continue;
     const chk = checkConnect('blue', src, t);
     if (!chk.ok && !chk.broke) continue;
     const color = t.kind === 'flag' ? 0xffe066 : t.team === 'blue' ? 0x7fd0ff : t.team === 'red' ? 0xff8a8a : 0xffffff;
@@ -1616,6 +1623,11 @@ canvas.addEventListener('pointerdown', (ev) => {
   const hit = pickEntity(ev, true);
   const onPath = S.phase === 'connect' && !hit ? pathAt(groundPoint(ev)) : null;
   const e = hit || (onPath ? null : pickEntity(ev));
+  const step = S.phase === 'connect' ? curStep : null;
+  if (step && !(step.kind === 'connect' && e === step.src)) {
+    toast(step.kind === 'ready' ? 'Tap READY to start the battle' : 'Follow the hand 👆');
+    return;
+  }
   if (S.phase === 'connect' && e && e.team === 'blue' && canSource(e)) {
     drag = { type: 'connect', src: e, id: ev.pointerId };
     zoneFillMat.color.set(0xffffff);
@@ -1653,7 +1665,9 @@ function moveConnect(ev) {
   if (tgt === src) tgt = null;
   const p = appXY(ev);
   if (tgt) {
-    const chk = checkConnect('blue', src, tgt);
+    const chk = curStep && curStep.t && tgt !== curStep.t
+      ? { ok: false, reason: 'Follow the hand 👆' }
+      : checkConnect('blue', src, tgt);
     drag.tgt = tgt;
     drag.chk = chk;
     const color = chk.ok ? 0x6dff9a : (chk.reason === 'Already connected' ? 0xffffff : 0xff5a5a);
@@ -1696,9 +1710,11 @@ window.addEventListener('pointerup', (ev) => {
   if (!drag || ev.pointerId !== drag.id) return;
   const d = drag;
   if (d.type === 'connect') {
-    if (d.tgt) {
+    if (d.tgt && curStep && curStep.t && d.tgt !== curStep.t) toast('Follow the hand 👆');
+    else if (d.tgt) {
       const res = connect('blue', d.src, d.tgt);
       if (res.ok) {
+        if (curStep && d.tgt === curStep.t) S.tutDone[S.round] = true;
         if (!seen('firstPath')) { markSeen('firstPath'); queueTip('afterFirstPath'); }
       } else if (res.reason && !res.silent) {
         toast(res.reason);
@@ -1815,13 +1831,61 @@ function hintPair(kind) {
   }
   return null;
 }
+// Reinforce lesson: a sender to another of your buildings (unit buildings first).
+function reinforcePair() {
+  const srcs = buildings('blue').filter(isSender).sort((a, b) => (b === S.home) - (a === S.home));
+  const rank = (t) => (isSender(t) ? 0 : 1);
+  for (const src of srcs) {
+    const t = buildings('blue').filter((t) => t !== src && checkConnect('blue', src, t).ok)
+      .sort((a, b) => rank(a) - rank(b) || dist(src, a) - dist(src, b))[0];
+    if (t) return { src, t };
+  }
+  return null;
+}
+
+// First match only: turn 1 capture a flag tower then tap READY, turn 2 mine a
+// rock, turn 3 reinforce your own building. While a step is active it's the
+// only move allowed and the timer waits.
+let curStep = null;
+function tutorialStep() {
+  if (!S.tutorial || S.phase !== 'connect') return null;
+  if (S.round === 1) {
+    if (!S.paths.some((p) => p.team === 'blue')) {
+      const pair = hintPair('flag') || hintPair('rock');
+      return pair && { kind: 'connect', ...pair, text: pair.t.kind === 'flag' ? 'Drag here to capture it!' : 'Mine this rock for bricks!' };
+    }
+    return { kind: 'ready' };
+  }
+  if (S.tutDone[S.round]) return null;
+  if (S.round === 2) {
+    const pair = hintPair('rock');
+    return pair && { kind: 'connect', ...pair, text: 'Mine this rock for bricks!' };
+  }
+  if (S.round === 3) {
+    const pair = reinforcePair();
+    return pair && { kind: 'connect', ...pair, text: isSender(pair.t) ? 'Reinforce it: 5 units = +1 floor' : 'Feed your own building!' };
+  }
+  return null;
+}
+function endTutorial() {
+  if (!S.tutorial) return;
+  S.tutorial = false;
+  curStep = null;
+  handTutorialPending = false;
+}
+
 let hintOn = false;
 function updateHand(time) {
-  const first = S.round === 1 && S.phase === 'connect' && !drag && !S.paused;
-  const hasPath = S.paths.some((p) => p.team === 'blue');
-  if (first && hasPath && goBtn.offsetParent) {
+  const step = curStep;
+  if (!step || drag || S.paused || (step.kind === 'ready' && !goBtn.offsetParent)) {
+    hand.classList.add('hidden');
+    if (hintOn && !drag) hideBubble();
+    hintOn = false;
+    return;
+  }
+  hintOn = true;
+  if (step.kind === 'ready') {
     // point up at READY with a little tap bob
-    hintOn = true;
     const ar = app.getBoundingClientRect(), br = goBtn.getBoundingClientRect();
     const x = br.left + br.width / 2 - ar.left, y = br.bottom - ar.top;
     const bob = Math.abs(Math.sin(time * 4)) * 10;
@@ -1831,18 +1895,7 @@ function updateHand(time) {
     showBubble('Tap READY to start the battle', x, y + 62, 'below');
     return;
   }
-  // turn 1: capture a flag tower; turn 2: mine a rock until you have a rock path
-  const mining = S.round === 2 && S.phase === 'connect' && !drag && !S.paused
-    && !S.paths.some((p) => p.team === 'blue' && p.to.kind === 'rock');
-  const pair = (first && !hasPath && (hintPair('flag') || hintPair('rock'))) || (mining && hintPair('rock'));
-  if (!pair) {
-    hand.classList.add('hidden');
-    if (hintOn && !drag) hideBubble();
-    hintOn = false;
-    return;
-  }
-  hintOn = true;
-  const { src, t } = pair;
+  const { src, t } = step;
   const k = (time % 2.2) / 2.2;
   const e = Math.min(1, Math.max(0, (k - 0.15) / 0.6));
   const ease = e * e * (3 - 2 * e);
@@ -1851,7 +1904,7 @@ function updateHand(time) {
   hand.style.opacity = k > 0.88 ? (1 - (k - 0.88) / 0.12) : 1;
   hand.style.transform = `translate(${a.x + (b.x - a.x) * ease - 14}px, ${a.y + (b.y - a.y) * ease - 4}px)`;
   const bp = toScreen(t.x, entHeight(t) + 0.45, t.z);
-  showBubble(t.kind === 'flag' ? 'Drag here to capture it!' : 'Mine this rock for bricks!', bp.x, bp.y - 6);
+  showBubble(step.text, bp.x, bp.y - 6);
 }
 
 let last = performance.now();
@@ -1865,9 +1918,11 @@ function frame(now) {
 }
 
 function update(dt, time) {
+  if (S && !drag && !S.paused) curStep = tutorialStep();
   if (S && !S.paused) {
     if (S.phase === 'connect') {
-      if (S.round > 1) S.timer -= dt;   // first turn waits for you
+      // tutorial steps wait for you: the countdown starts once the step is done
+      if (!curStep) S.timer -= dt;
       if (S.timer <= 0) endPhase();
       else updateTimer();
     } else if (S.phase === 'battle') {
@@ -2072,7 +2127,7 @@ function showHelp() {
   showSlides(introSlides(true), 'RESUME', null,
     '<button class="link" id="resetTips">SHOW TIPS AGAIN</button><button class="link" id="newMatchLink">NEW MATCH</button>',
     () => {
-      $('resetTips').onclick = () => { resetTips(); toast('Tips will show again'); };
+      $('resetTips').onclick = () => { resetTips(); toast('Tips & hand tutorial return next match'); };
       $('newMatchLink').onclick = confirmRestart;
     });
 }
@@ -2127,7 +2182,7 @@ async function boot() {
   requestAnimationFrame(frame);
   // debug hook for testing in the console
   window.CB = {
-    get state() { return S; }, endPhase, connect, addEntity, destroy, rollKind, spawnFlag, unlock, resetTips,
+    get state() { return S; }, get step() { return curStep; }, endPhase, connect, addEntity, destroy, rollKind, spawnFlag, unlock, resetTips,
     setBricks(n, team = 'blue') { S.bricks[team] = n; updateHud(); },
     clearBoard() {
       for (const e of [...S.ents]) removeEntity(e);
