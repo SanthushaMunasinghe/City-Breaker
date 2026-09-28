@@ -334,7 +334,7 @@ i.brick {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 3px 4px 6px;
+  padding: 0 3px 5px;
   cursor: grab;
   touch-action: none;
   transition: transform .12s;
@@ -342,9 +342,9 @@ i.brick {
 .card img { width: 100%; flex: 1; min-height: 0; object-fit: contain; pointer-events: none; }
 .card .nm {
   font-family: 'Lilita One', sans-serif;
-  font-size: clamp(11px, 3.5vw, 16px);
-  line-height: 1.1;
-  margin: 1px 0 4px;
+  font-size: clamp(9px, 2.8vw, 13px);
+  line-height: 1;
+  margin: 0 0 3px;
   white-space: nowrap;
 }
 .card .cost {
@@ -357,8 +357,8 @@ i.brick {
   align-items: center;
   gap: 5px;
   font-family: 'Lilita One', sans-serif;
-  font-size: clamp(13px, 4vw, 18px);
-  line-height: 1.2;
+  font-size: clamp(11px, 3.4vw, 15px);
+  line-height: 1.15;
 }
 .card.sel {
   border-color: #d6f6ff;

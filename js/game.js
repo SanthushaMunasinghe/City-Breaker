@@ -10,7 +10,7 @@ const HOME = { blue: [2, ROWS - 2], red: [COLS - 3, 1] };
 const MODEL_SCALE = 0.8;      // buildings & rocks sit inside their tile with a visible gap
 const RANGE = 3.5;            // longest connection radius in tiles (center to center)
 const SENDER_RANGE = { squad: RANGE / 2, tank: RANGE, heli: RANGE };
-const PATH_COST = 2;
+const PATH_COST = 0;           // drawing paths is free
 const UNITS_PER_PATH = 5;
 const PHASE_TIME = 30;
 const MAX_ROUNDS = 15;
@@ -511,7 +511,6 @@ function checkConnect(team, from, to) {
   if (!losClear(from, to, losMode(from))) {
     return { ok: false, reason: from.kind === 'heli' ? 'Mountains block helicopters' : 'Path blocked' };
   }
-  if (S.bricks[team] < PATH_COST) return { ok: false, reason: `Need ${PATH_COST} bricks` };
   let verb = 'Attack!';
   if (to.kind === 'rock') verb = 'Mine rock';
   else if (to.team === team) {
@@ -528,7 +527,6 @@ function connect(team, from, to) {
     const rev = findPath(to, from);
     if (rev) S.paths.splice(S.paths.indexOf(rev), 1);
   }
-  S.bricks[team] -= PATH_COST;
   S.paths.push({ id: S.nextId++, team, from, to, grow: 0 });
   rebuildPaths();
   updateHud();
@@ -1104,7 +1102,6 @@ function updateBattle(dt) {
 // ---------------------------------------------------------------- CPU
 function cpuConnect() {
   const team = 'red';
-  const reserve = S.round >= 2 ? Math.min(8, Math.floor(S.bricks.red * 0.25)) : 0;
   const maxNew = 2 + Math.floor(S.round / 3);
   const cands = [];
   for (const src of buildings(team).filter(isSender)) {
@@ -1129,7 +1126,7 @@ function cpuConnect() {
   cands.sort((a, b) => b.score - a.score);
   let made = 0;
   for (const c of cands) {
-    if (made >= maxNew || S.bricks.red - PATH_COST < reserve) break;
+    if (made >= maxNew) break;
     if (c.score < 2) break;
     if (connect(team, c.src, c.t).ok) made++;
   }
@@ -1155,7 +1152,7 @@ function cpuBuild() {
   let built = 0;
   for (const kind of hand) {
     if (built >= 2) break;
-    if (S.bricks.red - CARDS[kind].cost < PATH_COST) continue;
+    if (S.bricks.red < CARDS[kind].cost) continue;
     if (pri(kind) < 2) continue;
     let spot = null;
     if (kind === 'shield') {
@@ -1280,13 +1277,6 @@ function endBuild() {
 function startConnect() {
   S.phase = 'connect';
   S.timer = PHASE_TIME;
-  // safety net: a team with no income and no bricks could never act again
-  for (const team of ['blue', 'red']) {
-    if (S.bricks[team] < PATH_COST && !S.paths.some((p) => p.team === team)) {
-      S.bricks[team] = PATH_COST;
-      if (team === 'blue') toast(`Emergency supply: ${PATH_COST} bricks`);
-    }
-  }
   renderPanel();
   updateHud();
 }
@@ -1388,7 +1378,7 @@ function renderPanel() {
   } else if (S.phase === 'connect') {
     panelTitle.textContent = S.round === 1 ? 'OPENING ROUND • CONNECT FIRST' : 'CONNECT • DRAG A PATH';
     panelBody.innerHTML = `
-      <div class="info"><div class="big">${BRICK}${PATH_COST}</div><div class="small">per new<br>path</div></div>
+      <div class="info"><div class="big">FREE</div><div class="small">drawing<br>paths</div></div>
       <div class="info"><div class="big">${UNITS_PER_PATH}</div><div class="small">soldiers or 1<br>vehicle / floor</div></div>
       <div class="info wide">
         <p>Drag from a <b>squad, tank or heli</b> to a target in range.</p>
@@ -1452,7 +1442,7 @@ function renderIcons() {
     sc.add(model);
     const h = model.userData.getHeight ? model.userData.getHeight() : 0.65;
     const look = new THREE.Vector3(0.04, h * 0.45, 0);
-    const d = 2.7 + h * 0.9;
+    const d = 1.75 + h * 0.75;
     cam.position.set(look.x + d * 0.42, look.y + d * 0.5, look.z + d * 0.76);
     cam.lookAt(look);
     r.render(sc, cam);
@@ -1644,7 +1634,7 @@ window.addEventListener('pointerup', (ev) => {
       const res = connect('blue', d.src, d.tgt);
       if (res.ok) {
         S.tutorial = false;
-        toast(`${res.verb} • −${PATH_COST} bricks`);
+        toast(res.verb);
       } else if (res.reason && !res.silent) toast(res.reason);
     }
   } else if (d.type === 'card') {
@@ -1659,7 +1649,7 @@ window.addEventListener('pointerup', (ev) => {
       if (S.selected >= 0) toast('Tap a tile to place');
     }
   } else if (d.type === 'cut') {
-    if (d.cut) toast(`${d.cut} path${d.cut > 1 ? 's' : ''} cut (no refund)`);
+    if (d.cut) toast(`${d.cut} path${d.cut > 1 ? 's' : ''} cut`);
   } else if (d.type === 'tap' && Math.hypot(ev.clientX - d.x, ev.clientY - d.y) < 10) {
     tapBoard(ev);
   }
@@ -1850,7 +1840,7 @@ function closeModal() {
 const RULES = `
   <ul>
     <li><b>Build → Connect → Battle.</b> Both teams act at the same time. Each phase lasts ${PHASE_TIME}s, or press the button to finish early. Round 1 skips Build.</li>
-    <li><b>Connect:</b> drag from a squad, tank or heli building to a rock, enemy or friendly building within range (squads ${SENDER_RANGE.squad} tiles, tanks &amp; helis ${RANGE}). Each new path costs ${PATH_COST} bricks. A building gets one path slot per floor (max ${MAX_LINKS}); the circles under its number show free slots. Swipe across a path to cut it (no refund).</li>
+    <li><b>Connect:</b> drag from a squad, tank or heli building to a rock, enemy or friendly building within range (squads ${SENDER_RANGE.squad} tiles, tanks &amp; helis ${RANGE}). Paths are free. A building gets one path slot per floor (max ${MAX_LINKS}); the circles under its number show free slots. Swipe across a path to cut it.</li>
     <li><b>Terrain:</b> rocks, buildings and <b>water</b> block ground paths. <b>Helicopters</b> fly over them. <b>Mountains</b> block every path and every shot. You can't build on water or mountains.</li>
     <li><b>Units:</b> a <b>squad</b> sends ${UNITS_PER_PATH} soldiers (1 hp, 1 dmg each). A <b>tank</b> or <b>heli</b> sends one vehicle with 5 hp that hits for 5 on arrival. Tanks shoot any enemy unit on their path up to 2 tiles ahead; helis shoot ground units on their path. Every floor of the building adds another batch. Each point of damage on a rock, building or enemy unit earns 1 brick. Armies on opposing paths clash in the middle.</li>
     <li><b>Floors:</b> every building starts with 1 floor (5 hp) and can grow to ${MAX_HP / 5} floors (${MAX_HP} hp). <b>Friendly paths:</b> every 5 hp delivered = +1 floor. Supply a <b>cannon</b> (1 shot per unit) or a <b>quarry</b> (+${QUARRY_YIELD} bricks per unit). Draw a friendly path the other way to reverse it.</li>
