@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#13264b" />
+  <title>City Breaker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Lilita+One&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <canvas id="scene"></canvas>
+    <div id="labels"></div>
+    <div id="floats"></div>
+
+    <header id="hud">
+      <div class="title-pill">CITY BREAKER</div>
+      <div class="phase-box">
+        <div class="phase-pill" id="phasePill">1 • CONNECT</div>
+        <div class="timer-pill">
+          <svg viewBox="0 0 24 24" class="clock"><circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="2.6"/><path d="M12 7v5.5l3.5 2" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
+          <span id="timerText">CONNECT • 30s</span>
+        </div>
+      </div>
+      <div class="brick-pill"><i class="brick"></i><span id="brickCount">20</span></div>
+    </header>
+
+    <div id="hudRow2">
+      <div class="team-chip blue">YOU <b id="blueCount">1</b></div>
+      <button id="helpBtn" aria-label="How to play">?</button>
+      <div class="team-chip red">CPU <b id="redCount">1</b></div>
+    </div>
+
+    <div id="bubble" class="bubble hidden"></div>
+    <div id="hand" class="hand hidden">👆</div>
+    <div id="toast" class="toast"></div>
+
+    <section id="panel">
+      <div id="panelTitle">CONNECT • DRAG A PATH</div>
+      <div id="panelBody"></div>
+      <button id="endBtn">END TURN</button>
+    </section>
+
+    <div id="modal" class="modal">
+      <div class="modal-box" id="modalBox"></div>
+    </div>
+  </div>
+
+  <script type="module" src="js/game.js"></script>
+</body>
+</html>
